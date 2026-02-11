@@ -1,1 +1,23 @@
+# ROOT / data
 *.root
+*.hipo
+*.dat
+*.csv
+
+# build
+*.so
+*.o
+*.d
+*.pcm
+build/
+out/
+
+# logs
+*.log
+
+# temporary
+*~
+.DS_Store
+
+# ROOT ACLiC generated files
+common_led_cxx_ACLiC_*
