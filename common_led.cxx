@@ -1,6 +1,6 @@
 // Original code: https://github.com/tlprotzman/eeemcal_desy_dec2025/blob/main/common.cxx
 
-#include <common_led.h>
+#include "common_led.h"
 
 #include <algorithm>
 #include <cmath>
@@ -71,7 +71,7 @@ std::map<int, std::vector<int>> read_mapping_csv(const std::string &filename,
                 continue;
 
             auto &vec = mapping[crystal];
-            if ((int)vec.size() <= expected_sipms_per_crystal)
+            if ((int)vec.size() < expected_sipms_per_crystal)
             {
                 vec.resize(expected_sipms_per_crystal, -1);
             }
@@ -101,15 +101,15 @@ std::vector<int> get_crystal_channels(const std::map<int, std::vector<int>> &map
 }
 
 // ===== Signal extraction (ADC) =====
-static inline float pedestal_3samples(uint32_t *adc_values)
+static inline float pedestal_2samples(uint32_t *adc_values)
 {
-    return (adc_values[0] + adc_values[1] + adc_values[2]) / 3.0f;
+    return (adc_values[0] + adc_values[1] /*+ adc_values[2]*/) / /*3.0f*/2.0f;
 }
 
 float calculate_signal_v2(uint32_t *adc_values, float gain)
 {
-    // Pedestal is the mean of the first three samples
-    float ped = pedestal_3samples(adc_values);
+    // Pedestal is the mean of the first two samples
+    float ped = pedestal_2samples(adc_values);
 
     // Signal is the sum of the three greatest values
     float max1 = 0.0f, max2 = 0.0f, max3 = 0.0f;
@@ -138,12 +138,12 @@ float calculate_signal_v2(uint32_t *adc_values, float gain)
 
 float calculate_signal_v3(uint32_t *adc_values, float gain)
 {
-    // Pedestal is the mean of the first three samples
-    float ped = pedestal_3samples(adc_values);
+    // Pedestal is the mean of the first two samples
+    float ped = pedestal_2samples(adc_values);
 
     // Signal is the sum of all samples above pedestal
     float signal = 0.0f;
-    for (int i = 6; i <= 8; ++i)
+    for (int i = 3; i <= 5; ++i)
     {
         float sample = adc_values[i] - ped;
         if (sample > 0) signal += sample;
@@ -153,8 +153,8 @@ float calculate_signal_v3(uint32_t *adc_values, float gain)
 
 float calculate_signal_v4(uint32_t *adc_values, float gain)
 {
-    // Pedestal is the mean of the first three samples
-    float ped = pedestal_3samples(adc_values);
+    // Pedestal is the mean of the first two samples
+    float ped = pedestal_2samples(adc_values);
     
     // Signal is sample 6 minus pedestal
     float signal = adc_values[6] - ped;
@@ -167,8 +167,8 @@ float calculate_signal_v4(uint32_t *adc_values, float gain)
 
 float calculate_signal_v5(uint32_t *adc_values, float gain)
 {
-    // Pedestal is the mean of the first three samples
-    float ped = pedestal_3samples(adc_values);
+    // Pedestal is the mean of the first two samples
+    float ped = pedestal_2samples(adc_values);
 
     // Find the sample with the maximum adc
     float max_sample = 0.0f;
@@ -195,7 +195,7 @@ float calculate_signal_v5(uint32_t *adc_values, float gain)
 }
 
 // ===== Crystal Ball function for fitting =====
-static double crystal_ball(double *inputs, double *par)
+static double crystal_ball_waveform(double *inputs, double *par)
 {
     // Parameters
     // alpha: Where the gaussian transitions to the power law tail - fix?
@@ -203,7 +203,7 @@ static double crystal_ball(double *inputs, double *par)
     // x_bar: The mean of the gaussian - free
     // sigma: The width of the gaussian - fix ?
     // N: The normalization of the gaussian - free
-    // B baseline - fix?
+    // B baseline - fix? Maybe offset
 
     double x      = inputs[0];
     double alpha  = par[0];
@@ -213,55 +213,34 @@ static double crystal_ball(double *inputs, double *par)
     double N      = par[4];
     double offset = par[5];
 
-    double A = std::pow(n / fabs(alpha), n) * exp(-0.5 * alpha * alpha);
-    double B = n / fabs(alpha) - fabs(alpha);
+    double A = std::pow(n / std::fabs(alpha), n) * std::exp(-0.5 * alpha * alpha);
+    double B = n / std::fabs(alpha) - std::fabs(alpha);
     // std::cout << "A: " << A << std::endl;
+
+    double t = (x - x_bar) / sigma;
+    double y = 0.0;
 
     // std::cout << "alpha: " << alpha << " n: " << n << " x_bar: " << x_bar << " sigma: " << sigma << " N: " << N << " B: " << B << " A: " << A << std::endl;
 
-    double ret_val;
-    if ((x - x_bar) / sigma < alpha)
+    if (t < alpha)
     {
         // std::cout << "path a" << std::endl;
-        ret_val = exp(-0.5 * (x - x_bar) * (x - x_bar) / (sigma * sigma));
+        y = std::exp(-0.5 * t * t);
     }
     else
     {
         // std::cout << "path b" << std::endl;
-        ret_val = A * pow(B + (x - x_bar) / sigma, -1 * n);
+        y = A * std::pow(B + t, -1 * n);
     }
-    ret_val = N * ret_val + offset;
     // std::cout << "x: " << x << " y: " << ret_val << std::endl;
-    return ret_val;
+    return N * y + offset;
 }
-
-float sigma_cut = 2;
-
-int sipms_to_use = 16;
-
-float center_x = 1.95396;
-float sigma_x = 0.184758 * sigma_cut;
-float center_y = 1.9688;
-float sigma_y = 0.195137 * sigma_cut;
-
-// float adc_calib = 26704.4;  // 32444.1 Signal_ADC = 1 GeV
-// float adc_calib = 57854.3;  // v3
-
-int signal_method = 3;
-
-
-
-
-
-
-
-
 
 float calculate_signal_v6(uint32_t *adc_values, uint32_t *common_mode, float gain)
 {
-    // Pedestal is the mean of the first three samples
-    float pedestal = (adc_values[0] + adc_values[1] + adc_values[2]) / 3.0f;
-    float common_mode_pedestal = (common_mode[0] + common_mode[1] + common_mode[2]) / 3.0f;
+    // Pedestal is the mean of the first two samples
+    float ped = pedestal_2samples(adc_values);
+    float common_mode_pedestal = pedestal_2samples(common_mode);
 
     // Sum samples 6, 7 and 8 after common mode subtraction
     // float sig_0 = adc_values[5] - pedestal;
@@ -290,7 +269,7 @@ float calculate_signal_v6(uint32_t *adc_values, uint32_t *common_mode, float gai
     float sig = 0.0f;
     for (int i = 5; i <= 8; i++)
     {
-        float sample = adc_values[i] - pedestal;
+        float sample = adc_values[i] - ped;
         float comm_sample = common_mode[i] - common_mode_pedestal;
         float corrected_sample = sample - comm_sample;
         if (corrected_sample > 0)
@@ -309,172 +288,72 @@ float calculate_signal_v6(uint32_t *adc_values, uint32_t *common_mode, float gai
     return signal * gain;
 }
 
-
-
 float calculate_signal_v7(uint32_t *adc_values, float gain)
 {
-    TF1 *crystal_ball_fit = new TF1("crystal_ball", crystal_ball, 4, 20, 6);
-    crystal_ball_fit->SetParameters(1, 1, 6, 4, 2);
-    crystal_ball_fit->SetParLimits(0, 1, 1.2);     // alpha
-    crystal_ball_fit->SetParLimits(1, 0.2, 0.6);   // n
-    crystal_ball_fit->SetParLimits(2, 0.5, 4.5);   // x_bar
-    crystal_ball_fit->SetParLimits(3, 0.25, 0.65); // sigma
-    crystal_ball_fit->SetParLimits(4, 0, 2000);    // N
-    float pedestal = (adc_values[0] + adc_values[1] + adc_values[2]) / 3.0f;
-    crystal_ball_fit->FixParameter(5, pedestal);
+    // Fit samples in a histogram (bins correspond to time sample index)
 
-    // Fit the samples from 3 to 19
-    TH1F *temp_hist = new TH1F("temp_hist", "temp_hist", 20, 0, 20);
+    TH1F temp("temp_waveform", "temp_waveform", 20, 0, 20);
     for (int i = 3; i < 20; ++i)
     {
         float sample = adc_values[i];
-        temp_hist->SetBinContent(i, sample);
+        temp.SetBinContent(i, sample); // ROOT histograms start at bin 1
     }
-    temp_hist->Fit(crystal_ball_fit, "RQ");
-    // std::cout << "Fit parameters: ";
-    // for (int i = 0; i < 5; ++i) {
-    //     std::cout << crystal_ball_fit->GetParameter(i) << " ";
-    // }
-    // std::cout << std::endl;
-    // std::cout << "Fit chi2/ndf: " << crystal_ball_fit->GetChisquare() / crystal_ball_fit->GetNDF() << std::endl;
-    float signal = crystal_ball_fit->GetParameter(4);
-    ;
-    delete temp_hist;
-    delete crystal_ball_fit;
-    return signal * gain;
+    float ped = pedestal_2samples(adc_values);
+
+    TF1 fit("cb_wave", crystal_ball_waveform, 4, 20, 6);
+    fit.SetParameters(1.1, 0.4, 6.0, 0.45, 50.0, ped);
+    fit.SetParLimits(0, 1.0, 1.2);   // alpha
+    fit.SetParLimits(1, 0.2, 0.8);   // n
+    fit.SetParLimits(2, 0.5, 8.5);   // x_bar
+    fit.SetParLimits(3, 0.25, 0.65); // sigma
+    fit.SetParLimits(4, 0, 2000);    // N
+    fit.FixParameter(5, ped);        // offset fixed to pedestal
+
+    // Quiet fit
+    TFitResultPtr fit_result = temp.Fit(&fit, "RQ0S");
+    
+    // Signal proxy = N parameter
+    float sig = (fit_result.Get() && fit_result->Status()==0) ? fit.GetParameter(4) : 0.0f;
+
+    return sig * gain;
 }
 
-float calculate_signal(uint32_t *adc_values, float gain)
+float calculate_signal_adc(uint32_t *adc_values, float gain)
 {
-    if (signal_method == 2)
+    if (g_signal_method == 2)
     {
         return calculate_signal_v2(adc_values, gain);
     }
-    else if (signal_method == 3)
+    else if (g_signal_method == 3)
     {
         return calculate_signal_v3(adc_values, gain);
     }
-    else if (signal_method == 4)
+    else if (g_signal_method == 4)
     {
         return calculate_signal_v4(adc_values, gain);
     }
-    else if (signal_method == 5)
+    else if (g_signal_method == 5)
     {
         return calculate_signal_v5(adc_values, gain);
     }
-    else if (signal_method == 7)
+    else if (g_signal_method == 7)
     {
         return calculate_signal_v7(adc_values, gain);
     }
     else
     {
-        // Default to v2
-        return calculate_signal_v2(adc_values, gain);
+        // Default to v3
+        return calculate_signal_v3(adc_values, gain);
     }
 }
 
-bool calculate_signal(uint32_t *adc_values, uint32_t *tot_values, float gain, float &signal)
-{
-    if (signal_method == 2)
-    {
-        // Check if there is a ToT value
-        uint32_t tot = 0;
-        for (int i = 0; i < 20; ++i)
-        {
-            if (tot_values[i] > 0)
-            {
-                tot = tot_values[i];
-                break;
-            }
-        }
-        // If there is no ToT value
-        if (tot == 0)
-        {
-            signal = calculate_signal(adc_values, gain);
-            return false;
-        }
+// ===== ToT helpers =====
 
-        // Otherwise, just return the first ToT value
-        signal = tot * gain;
-        return true;
-    }
-    else if (signal_method == 3)
-    {
-        // Check if there is a ToT value
-        uint32_t tot = 0;
-        for (int i = 0; i < 20; ++i)
-        {
-            if (tot_values[i] > 0)
-            {
-                tot = tot_values[i];
-                break;
-            }
-        }
-        // If there is no ToT value
-        if (tot == 0)
-        {
-            signal = calculate_signal_v3(adc_values, gain);
-            return false;
-        }
-        signal = tot;
-        return true;
-    }
-    else if (signal_method == 4)
-    {
-        // Check if there is a ToT value
-        uint32_t tot = 0;
-        for (int i = 0; i < 20; ++i)
-        {
-            if (tot_values[i] > 0)
-            {
-                tot = tot_values[i];
-                break;
-            }
-        }
-        // If there is no ToT value
-        if (tot == 0)
-        {
-            signal = calculate_signal_v4(adc_values, gain);
-            return false;
-        }
-        signal = tot;
-        return true;
-    }
-    else if (signal_method == 5)
-    {
-        // Check if there is a ToT value
-        uint32_t tot = 0;
-        for (int i = 0; i < 20; ++i)
-        {
-            if (tot_values[i] > 0)
-            {
-                tot = tot_values[i];
-                break;
-            }
-        }
-        // If there is no ToT value
-        if (tot == 0)
-        {
-            signal = calculate_signal_v5(adc_values, gain);
-            return false;
-        }
-        signal = tot;
-        return true;
-    }
-    else
-    {
-        // Default to ADC signal
-        signal = calculate_signal(adc_values, gain);
-        return false;
-    }
-}
-
-bool is_tot(uint32_t *tot_values)
+bool has_tot(uint32_t *tot_values)
 {
     for (int i = 0; i < 20; ++i)
     {
-        // std::cout << "TOT Value[" << i << "]: " << tot_values[i] << std::endl;
-        if (tot_values[i] > 50)
+        if (tot_values[i] > g_tot_min)
         {
             return true;
         }
@@ -482,145 +361,328 @@ bool is_tot(uint32_t *tot_values)
     return false;
 }
 
-int32_t get_toa(uint32_t *toa_values)
+uint32_t get_tot_first(uint32_t *tot_values)
 {
     for (int i = 0; i < 20; ++i)
     {
-        if (toa_values[i] > 0)
+        if (tot_values[i] > g_tot_min)
         {
-            return toa_values[i];
+            return tot_values[i];
         }
     }
-    return -1;
+    return 0;
 }
 
-bool fit_peak(TH1 *hist)
+uint32_t get_tot_max(uint32_t *tot_values)
 {
-    float lower_bound = hist->GetXaxis()->GetXmin();
-    float upper_bound = hist->GetXaxis()->GetXmax();
-    float mean = hist->GetMean();
-    // Check that the mean is within the histogram range
-    float rms = hist->GetRMS();
-    float fit_min = mean - 1.5 * rms;
-    float fit_max = mean + 1.5 * rms;
-    TF1 *rough_fit = new TF1("rough_fit", "gaus", fit_min, fit_max);
-    // std::cout << "fit 1 range: " << fit_min << " to " << fit_max << std::endl;
-    auto result = hist->Fit(rough_fit, "RQS");
-    if (result->Status() != 0 || rough_fit->GetParameter(1) < lower_bound || rough_fit->GetParameter(1) > upper_bound)
+    uint32_t max_tot = 0;
+    for (int i = 0; i < 20; ++i)
     {
-        std::cout << "failed!" << std::endl;
-        return true;
+        if (tot_values[i] > g_tot_min && tot_values[i] > max_tot)
+        {
+            max_tot = tot_values[i];
+        }
     }
-    float peak = rough_fit->GetParameter(1);
-    float sigma = rough_fit->GetParameter(2);
-    rough_fit->SetLineColor(kBlue);
-    rough_fit->SetLineStyle(2);
-
-    TF1 *second_fit = new TF1("second_fit", "gaus", peak - sigma, peak + sigma);
-    // std::cout << "fit 2 range: " << peak - sigma << " to " << peak + sigma << std::endl;
-    result = hist->Fit(second_fit, "RQS");
-    if (result->Status() != 0 || second_fit->GetParameter(1) < lower_bound || second_fit->GetParameter(1) > upper_bound)
-    {
-        std::cout << "failed!" << std::endl;
-        return true;
-    }
-    peak = second_fit->GetParameter(1);
-    sigma = second_fit->GetParameter(2);
-
-    // TF1* final_fit = new TF1("final_fit", "crystalball", peak - sigma, peak + sigma);
-    // final_fit->SetParameters(second_fit->GetParameter(0), peak, sigma, 1.5, 2.0);
-    TF1 *final_fit = new TF1("final_fit", "gaus", peak - sigma, peak + sigma);
-    // std::cout << "fit 3 range: " << peak - sigma << " to " << peak + sigma << std::endl;
-    result = hist->Fit(final_fit, "RQS");
-    if (result->Status() != 0 || final_fit->GetParameter(1) < lower_bound || final_fit->GetParameter(1) > upper_bound)
-    {
-        std::cout << "failed!" << std::endl;
-        return true;
-    }
-    return false;
+    return max_tot;
 }
 
-void draw_text(TF1 *fit, int run_number, float beam_energy)
+// Hybrid (ToT preferred if present)
+bool calculate_signal_hybrid(uint32_t *adc_values,
+                      uint32_t *tot_values,
+                      float gain_adc,
+                      float &signal_out,
+                      bool &used_tot)
 {
-    TLatex *text = new TLatex();
-    text->SetNDC();
-    text->SetTextSize(0.04);
-    text->SetTextFont(42);
-    text->SetTextAlign(31);
-
-    float peak = fit->GetParameter(1);
-    ;
-    float sigma = fit->GetParameter(2);
-    float resolution = (sigma / peak) * 100.0f;
-    text->DrawLatex(0.93, 0.85, Form("%.01f GeV Electrons", beam_energy));
-    text->DrawLatex(0.93, 0.80, Form("Run %d", run_number));
-    text->DrawLatex(0.93, 0.75, Form("Peak: %.03f", peak));
-    text->DrawLatex(0.93, 0.70, Form("Sigma: %.03f", sigma));
-    text->DrawLatex(0.93, 0.65, Form("Resolution: %.2f%%", resolution));
-    text->DrawLatex(0.93, 0.60, Form("Signal method %d", signal_method));
-}
-
-bool position_cut(float x, float y)
-{
-    // Cut anything outside of the center
-    if (std::abs(x - center_x) > sigma_x || std::abs(y - center_y) > sigma_y)
+    if (has_tot(tot_values))
     {
+        signal_out = get_tot_first(tot_values) * gain_adc; // Assuming same gain for ToT, adjust if different
+        used_tot = true;
+        return true;
+    }
+    else
+    {
+        signal_out = calculate_signal_adc(adc_values, gain_adc);
+        used_tot = false;
         return false;
     }
+}
+
+// ===== Peak fitting =====
+bool fit_peak_gaus(TH1 *hist, float &peak, float &sigma)
+{
+    if (!hist || hist->GetEntries() < 10)
+    {
+        std::cout << "Histogram is empty or null!" << std::endl;
+        return false;
+    }
+
+    float mean = hist->GetMean();
+    float rms = hist->GetRMS();
+    if (rms <= 0)
+    {
+        std::cout << "Histogram has non-positive RMS!" << std::endl;
+        return false;
+    }
+
+    TF1 fit("gauss_fit", "gaus", mean - 1.5f * rms, mean + 1.5f * rms);
+
+    TFitResultPtr result = hist->Fit(&fit, "RQ0S");
+
+    if (!result.Get() || result->Status() != 0)
+    {
+        std::cout << "Initial fit failed!" << std::endl;
+        return false;
+    }
+    
+    peak = fit.GetParameter(1);
+    sigma = fit.GetParameter(2);
+
     return true;
 }
 
-bool calculate_cog(TH2 *distribution, float *values)
+void draw_text_basic(TF1 *fit, const std::string &label1, const std::string &label2, const std::string &label3)
 {
-    float total_signal = 0;
-    float x_weighted_sum = 0;
-    float y_weighted_sum = 0;
-    float x_cog = 0;
-    float y_cog = 0;
-    float w = 4;
+    if (!fit) return;
 
-    for (int i = 0; i < 25; i++)
-    {
-        total_signal += values[i];
-    }
+    TLatex text;
+    text.SetNDC();
+    text.SetTextSize(0.04);
+    text.SetTextFont(42);
+    text.SetTextAlign(31);
 
-    float total_weight = 0;
-    for (int i = 0; i < 25; i++)
-    {
-        int x = i % 5;
-        int y = i / 5;
-        float signal = values[i];
-        float weight = w + std::log(signal / total_signal); // Avoid log(0)
-        if (weight < 0)
-        {
-            weight = 0;
-        }
-        total_weight += weight;
-        x_weighted_sum += x * weight;
-        y_weighted_sum += y * weight;
-    }
-    if (total_weight > 0)
-    {
-        x_cog = x_weighted_sum / total_weight;
-        y_cog = y_weighted_sum / total_weight;
-        distribution->Fill(x_cog, y_cog);
-    }
-    return position_cut(x_cog, y_cog);
+    float peak = fit->GetParameter(1);
+    float sigma = fit->GetParameter(2);
+    float res   = (peak != 0) ? (sigma/peak)*100.0f : 0.0f;
+
+    // text.DrawLatex(0.93, 0.85, Form("%.01f GeV Electrons", beam_energy));
+    // text.DrawLatex(0.93, 0.80, Form("Run %d", run_number));
+    text.DrawLatex(0.93, 0.85, label1.c_str());
+    if (!label2.empty()) text.DrawLatex(0.93, 0.80, label2.c_str());
+    if (!label3.empty()) text.DrawLatex(0.93, 0.75, label3.c_str());
+
+    text.DrawLatex(0.93, 0.70, Form("Peak: %.03f", peak));
+    text.DrawLatex(0.93, 0.65, Form("Sigma: %.03f", sigma));
+    text.DrawLatex(0.93, 0.60, Form("Resolution: %.2f%%", res));
+    text.DrawLatex(0.93, 0.55, Form("Method %d", g_signal_method));
 }
 
-void print_progress(int progress)
+std::vector<int> get_active_channels_from_mapping(const std::map<int, std::vector<int>>& mapping,
+                                                  int sipms_to_use,
+                                                  int n_crystals,
+                                                  int max_channels)
 {
-    std::cout << " [";
-    for (int i = 0; i < 25; i++)
-    {
-        if (i < progress)
-        {
-            std::cout << "*";
-        }
-        else
-        {
-            std::cout << " ";
+    std::set<int> unique;
+    for (int cr = 0; cr < n_crystals; ++cr) {
+        auto it = mapping.find(cr);
+        if (it == mapping.end()) continue;
+        const auto& v = it->second;
+        for (int s = 0; s < sipms_to_use && s < (int)v.size(); ++s) {
+            int ch = v[s];
+            if (ch >= 0 && ch < max_channels) unique.insert(ch);
         }
     }
-    std::cout << "]\r" << std::flush;
+    return std::vector<int>(unique.begin(), unique.end());
 }
+
+// float sigma_cut = 2;
+
+// int sipms_to_use = 16;
+
+// float center_x = 1.95396;
+// float sigma_x = 0.184758 * sigma_cut;
+// float center_y = 1.9688;
+// float sigma_y = 0.195137 * sigma_cut;
+
+// // float adc_calib = 26704.4;  // 32444.1 Signal_ADC = 1 GeV
+// // float adc_calib = 57854.3;  // v3
+
+// int signal_method = 3;
+
+// bool calculate_signal(uint32_t *adc_values, uint32_t *tot_values, float gain, float &signal)
+// {
+//     if (signal_method == 2)
+//     {
+//         // Check if there is a ToT value
+//         uint32_t tot = 0;
+//         for (int i = 0; i < 20; ++i)
+//         {
+//             if (tot_values[i] > 0)
+//             {
+//                 tot = tot_values[i];
+//                 break;
+//             }
+//         }
+//         // If there is no ToT value
+//         if (tot == 0)
+//         {
+//             signal = calculate_signal(adc_values, gain);
+//             return false;
+//         }
+
+//         // Otherwise, just return the first ToT value
+//         signal = tot * gain;
+//         return true;
+//     }
+//     else if (signal_method == 3)
+//     {
+//         // Check if there is a ToT value
+//         uint32_t tot = 0;
+//         for (int i = 0; i < 20; ++i)
+//         {
+//             if (tot_values[i] > 0)
+//             {
+//                 tot = tot_values[i];
+//                 break;
+//             }
+//         }
+//         // If there is no ToT value
+//         if (tot == 0)
+//         {
+//             signal = calculate_signal_v3(adc_values, gain);
+//             return false;
+//         }
+//         signal = tot * gain;
+//         return true;
+//     }
+//     else if (signal_method == 4)
+//     {
+//         // Check if there is a ToT value
+//         uint32_t tot = 0;
+//         for (int i = 0; i < 20; ++i)
+//         {
+//             if (tot_values[i] > 0)
+//             {
+//                 tot = tot_values[i];
+//                 break;
+//             }
+//         }
+//         // If there is no ToT value
+//         if (tot == 0)
+//         {
+//             signal = calculate_signal_v4(adc_values, gain);
+//             return false;
+//         }
+//         signal = tot * gain;
+//         return true;
+//     }
+//     else if (signal_method == 5)
+//     {
+//         // Check if there is a ToT value
+//         uint32_t tot = 0;
+//         for (int i = 0; i < 20; ++i)
+//         {
+//             if (tot_values[i] > 0)
+//             {
+//                 tot = tot_values[i];
+//                 break;
+//             }
+//         }
+//         // If there is no ToT value
+//         if (tot == 0)
+//         {
+//             signal = calculate_signal_v5(adc_values, gain);
+//             return false;
+//         }
+//         signal = tot * gain;
+//         return true;
+//     }
+//     else
+//     {
+//         // Default to ADC signal
+//         signal = calculate_signal_adc(adc_values, gain);
+//         return false;
+//     }
+// }
+
+// bool is_tot(uint32_t *tot_values)
+// {
+//     for (int i = 0; i < 20; ++i)
+//     {
+//         // std::cout << "TOT Value[" << i << "]: " << tot_values[i] << std::endl;
+//         if (tot_values[i] > g_tot_min)
+//         {
+//             return true;
+//         }
+//     }
+//     return false;
+// }
+
+// int32_t get_toa(uint32_t *toa_values)
+// {
+//     for (int i = 0; i < 20; ++i)
+//     {
+//         if (toa_values[i] > 0)
+//         {
+//             return toa_values[i];
+//         }
+//     }
+//     return -1;
+// }
+
+
+
+
+// bool position_cut(float x, float y)
+// {
+//     // Cut anything outside of the center
+//     if (std::abs(x - center_x) > sigma_x || std::abs(y - center_y) > sigma_y)
+//     {
+//         return false;
+//     }
+//     return true;
+// }
+
+// bool calculate_cog(TH2 *distribution, float *values)
+// {
+//     float total_signal = 0;
+//     float x_weighted_sum = 0;
+//     float y_weighted_sum = 0;
+//     float x_cog = 0;
+//     float y_cog = 0;
+//     float w = 4;
+
+//     for (int i = 0; i < 25; i++)
+//     {
+//         total_signal += values[i];
+//     }
+
+//     float total_weight = 0;
+//     for (int i = 0; i < 25; i++)
+//     {
+//         int x = i % 5;
+//         int y = i / 5;
+//         float signal = values[i];
+//         float weight = w + std::log(signal / total_signal); // Avoid log(0)
+//         if (weight < 0)
+//         {
+//             weight = 0;
+//         }
+//         total_weight += weight;
+//         x_weighted_sum += x * weight;
+//         y_weighted_sum += y * weight;
+//     }
+//     if (total_weight > 0)
+//     {
+//         x_cog = x_weighted_sum / total_weight;
+//         y_cog = y_weighted_sum / total_weight;
+//         distribution->Fill(x_cog, y_cog);
+//     }
+//     return position_cut(x_cog, y_cog);
+// }
+
+// void print_progress(int progress)
+// {
+//     std::cout << " [";
+//     for (int i = 0; i < 25; i++)
+//     {
+//         if (i < progress)
+//         {
+//             std::cout << "*";
+//         }
+//         else
+//         {
+//             std::cout << " ";
+//         }
+//     }
+//     std::cout << "]\r" << std::flush;
+// }
