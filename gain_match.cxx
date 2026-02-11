@@ -1,238 +1,698 @@
-#include <map>
-#include <vector>
+// gain_match.cxx
+//
+// Purpose: find per-channel gain factors by fitting the peak per SiPM,
+// then compute gain_factors[channel] = (mean peak of crystal) / (peak of that SiPM).
+// Optionally compute per-crystal equalization factors.
+//
+// Run examples:
+//   root -l -q 'common_led.cxx+ gain_match.cxx+ gain_match_one("data/Run385.root", 1.80, "eeemcal_desy_dec2025_mapping_v2.csv", "outputs")'
+//
+// Or scan a list like led_scan():
+//   root -l -q 'common_led.cxx+ gain_match.cxx+ gain_scan("data", "eeemcal_desy_dec2025_mapping_v2.csv", "outputs")'
+//
+// Or interactive:
+//   root -l -b
+//   .L common_led.cxx+
+//   .L gain_match.cxx+
+//   gain_scan("data", "eeemcal_desy_dec2025_mapping_v2.csv", "outputs")
+// Notes:
+// - This code reads adc/tot with dynamic sizes (TLeaf::GetLen()) like led_analysis.C.
+// - It uses mapping + reverse[channel] to route each channel into the correct (crystal,sipm) histogram.
+// - It works for mapping files that contain only 1 crystal OR many crystals.
 
-#include <TFitResult.h>
-#include <TFitResultPtr.h>
-#include <TF1.h>
-#include <TH1.h>
+#include "common_led.h"
+
+#include <TCanvas.h>
 #include <TFile.h>
 #include <TTree.h>
+#include <TBranch.h>
+#include <TLeaf.h>
+#include <TH1F.h>
+#include <TF1.h>
+#include <TLatex.h>
+#include <TStyle.h>
+#include <TSystem.h>
 #include <TError.h>
+#include <TFitResult.h>
+#include <TFitResultPtr.h>
 
-#include "common.C"
+#include <map>
+#include <array>
+#include <vector>
+#include <unordered_map>
+#include <utility>
+#include <string>
+#include <iostream>
+#include <cctype>
+#include <cmath>
+#include <algorithm>
 
+static constexpr int SAMPLES_PER_CHANNEL = 20;
+static constexpr int SIPMS_PER_CRYSTAL = 16; // keep fixed (your hardware)
+static constexpr int MAX_NUM_CRYSTALS = 25;  // keep fixed (your hardware)
 
-void gain_match() {
+// ------------------------------------------------------------
+// Robust peak finder
+//   1) gaussian in mean±1.5*rms
+//   2) gaussian in peak±sigma
+//   3) crystalball in peak±sigma
+// Returns true if final fit succeeded.
+// ------------------------------------------------------------
+static bool fit_peak_crystalball(TH1 *hist, float &peak_out, float &sigma_out)
+{
+    if (!hist || hist->GetEntries() < 30)
+        return false;
+
+    const double xMin = hist->GetXaxis()->GetXmin();
+    const double xMax = hist->GetXaxis()->GetXmax();
+
+    const double mean = hist->GetMean();
+    const double rms = hist->GetRMS();
+    if (!(rms > 0))
+        return false;
+
+    // Fit window
+    double fmin = mean - 1.5 * rms;
+    double fmax = mean + 1.5 * rms;
+
+    // Clamp to histogram limits
+    if (fmin < xMin)
+        fmin = xMin;
+    if (fmax > xMax)
+        fmax = xMax;
+
+    // If the window is too small, bail out
+    if (fmax - fmin < 5.0)
+        return false;
+
+    // Require some entries inside the window
+    int bmin = hist->GetXaxis()->FindBin(fmin);
+    int bmax = hist->GetXaxis()->FindBin(fmax);
+    if (hist->Integral(bmin, bmax) < 20)
+        return false;
+
+    // 1) rough gaussian
+    TF1 rough("rough_fit", "gaus", fmin, fmax);
+    if (hist->Fit(&rough, "RQS") != 0)
+        return false;
+    rough.SetLineColor(kBlue);
+    rough.SetLineStyle(2);
+
+    double peak = rough.GetParameter(1);
+    double sigma = rough.GetParameter(2);
+    if (!(sigma > 0))
+        return false;
+
+    // 2) refined gaussian (clamped)
+    double gmin = std::max(xMin, peak - sigma);
+    double gmax = std::min(xMax, peak + sigma);
+    if (gmax - gmin < 5.0)
+    {
+        peak_out = (float)peak;
+        sigma_out = (float)sigma;
+        return true;
+    }
+
+    TF1 second("second_fit", "gaus", gmin, gmax);
+    if (hist->Fit(&second, "RQ") == 0)
+    {
+        peak = second.GetParameter(1);
+        sigma = second.GetParameter(2);
+    }
+
+    if (!(sigma > 0))
+    {
+        peak_out = (float)peak;
+        sigma_out = (float)sigma;
+        return true;
+    }
+
+    // 3) crystalball (clamped)
+    double cmin = std::max(xMin, peak - sigma);
+    double cmax = std::min(xMax, peak + sigma);
+
+    if (cmax - cmin < 5.0)
+    {
+        peak_out = (float)peak;
+        sigma_out = (float)sigma;
+        return true;
+    }
+
+    TF1 cb("final_fit", "crystalball", cmin, cmax);
+    cb.SetParameters(second.GetParameter(0), peak, sigma, 1.5, 2.0);
+    if (hist->Fit(&cb, "RMQ") != 0)
+    {
+        peak_out = (float)peak;
+        sigma_out = (float)sigma;
+        return true;
+    }
+
+    peak_out = (float)cb.GetParameter(1);
+    sigma_out = (float)cb.GetParameter(2);
+
+    if (hist->GetFunction("final_fit"))
+        std::cout << "CB final_fit is stored\n";
+    if (hist->GetFunction("second_fit"))
+        std::cout << "Gaussian second_fit is stored\n";
+    if (hist->GetFunction("rough_fit"))
+        std::cout << "Gaussian rough_fit is stored\n";
+    return true;
+}
+
+// ------------------------------------------------------------
+// Dead-channel masks
+// Return true if that (crystal,sipm) should be excluded from crystal mean.
+// ------------------------------------------------------------
+static bool exclude_from_crystal_mean(int crystal, int sipm)
+{
+    // Crystal 21 dead channels
+    if (crystal == 21 && (sipm == 1 || sipm == 4 || sipm == 10 || sipm == 11 || sipm == 13 || sipm == 14 || sipm == 15))
+        return true;
+
+    // Crystal 15 weird channels
+    if (crystal == 15 && (sipm == 10 || sipm == 0 || sipm == 4 || sipm == 13 || sipm == 11))
+        return true;
+
+    return false;
+}
+
+// ------------------------------------------------------------
+// Core: gain match for ONE file (one run, one voltage label)
+// ------------------------------------------------------------
+void gain_match_one(const char *filename,
+                    float voltage,
+                    const char *mapping_csv = "eeemcal_desy_dec2025_mapping_v2.csv",
+                    const char *outdir = "outputs",
+                    bool use_hybrid_tot = true)
+{
     gStyle->SetOptStat(0);
     gErrorIgnoreLevel = kWarning;
 
-    std::vector<int> run_numbers = {385, 386, 387, 388, 389, 390, 391, 392, 393, 394, 410, 396, 397, 398, 399, 400, 401, 402, 403, 404, 405, 406, 407, 408, 409};
-    std::vector<int> run_crystal = { 19,  23,  24,  18,  13,  14,   8,   3,   4,   9,   2,   7,  12,  17,  22,  21,  16,  11,   6,   1,   0,   5,  10,  15,  20};
-    std::vector<TH1*> histograms(400); // 25 crystals * 16 SiPMs
+    g_signal_method = 3; // same as led_analysis default
+    g_tot_min = 50;
 
-    std::cout << "matching " << run_crystal.size() << " crystals" << std::endl;
+    gSystem->mkdir(outdir, true);
 
-    // Set up histograms
-    auto mapping = read_mapping("eeemcal_desy_dec2025_mapping.csv");
-    for (int crystal = 0; crystal < 25; crystal++) {
-        for (int sipm = 0; sipm < 16; sipm++) {
-            int channel = mapping[crystal][sipm];
-            auto hist = new TH1F(Form("crystal_%d_sipm_%d", crystal, sipm),
-                                 Form("Crystal %d SiPM %d Signal;Signal (ADC);Counts", crystal, sipm),
-                                 200, 0, 5500);
-            histograms[crystal * 16 + sipm] = hist;
-        }
+    // ---- Read mapping
+    auto mapping = read_mapping_csv(mapping_csv, SIPMS_PER_CRYSTAL);
+    if (mapping.empty())
+    {
+        std::cerr << "Error: mapping empty. Check mapping CSV: " << mapping_csv << "\n";
+        return;
     }
 
+    // ---- Open ROOT file
+    TFile *file = TFile::Open(filename);
+    if (!file || file->IsZombie())
+    {
+        std::cerr << "Error: could not open " << filename << "\n";
+        if (file)
+        {
+            file->Close();
+            delete file;
+        }
+        return;
+    }
 
-    // Process each run
-    for (int i = 0; i < run_numbers.size(); i++) {
-        print_progress(i);
-        int run_number = run_numbers[i];
-        int crystal = run_crystal[i];
-        TFile* root_file = TFile::Open(Form("/Users/tristan/dropbox/eeemcal_desy_dec_2025/prod_0/Run%03d.root", run_number));
-        TTree* tree = (TTree*)root_file->Get("events");
-        uint32_t adc[576][20];
-        tree->SetBranchAddress("adc", &adc);
-        tree->SetBranchStatus("*", 0);
-        tree->SetBranchStatus("adc", 1);
+    TTree *tree = (TTree *)file->Get("events");
+    if (!tree)
+    {
+        std::cerr << "Error: no TTree 'events' in " << filename << "\n";
+        file->Close();
+        delete file;
+        return;
+    }
 
-        // Fill histograms from tree
-        Long64_t nEntries = tree->GetEntries();
-        for (Long64_t entry = 0; entry < nEntries; ++entry) {
-            tree->GetEntry(entry);
-            for (int sipm = 0; sipm < 16; sipm++) {
-                int channel = mapping[crystal][sipm];
-                float signal = calculate_signal(adc[channel], 1.0f);
-                histograms[crystal * 16 + sipm]->Fill(signal);
+    // ---- Get adc/tot shape dynamically
+    TBranch *br_adc = tree->GetBranch("adc");
+    if (!br_adc)
+    {
+        std::cerr << "Error: missing branch 'adc'\n";
+        file->Close();
+        delete file;
+        return;
+    }
+    TLeaf *leaf_adc = br_adc->GetLeaf("adc");
+    if (!leaf_adc)
+    {
+        std::cerr << "Error: missing leaf 'adc'\n";
+        file->Close();
+        delete file;
+        return;
+    }
+
+    TBranch *br_tot = tree->GetBranch("tot");
+    TLeaf *leaf_tot = nullptr;
+    if (use_hybrid_tot)
+    {
+        if (!br_tot)
+        {
+            std::cerr << "Warning: use_hybrid_tot=true but branch 'tot' missing. Falling back to ADC-only.\n";
+            use_hybrid_tot = false;
+        }
+        else
+        {
+            leaf_tot = br_tot->GetLeaf("tot");
+            if (!leaf_tot)
+            {
+                std::cerr << "Warning: use_hybrid_tot=true but leaf 'tot' missing. Falling back to ADC-only.\n";
+                use_hybrid_tot = false;
             }
         }
     }
 
-    std::vector<float> peak_locations(400);
+    const int n_adc = leaf_adc->GetLen();
+    if ((n_adc % SAMPLES_PER_CHANNEL) != 0)
+    {
+        std::cerr << "Error: unexpected adc length n_adc=" << n_adc
+                  << " (not divisible by " << SAMPLES_PER_CHANNEL << ")\n";
+        file->Close();
+        delete file;
+        return;
+    }
 
-    // Fit each histogram to find the peak
-    for (int channel = 0; channel < histograms.size(); channel++) {
-        TH1* hist = histograms[channel];
-        float mean = hist->GetMean();
-        float rms = hist->GetRMS();
-        float fit_min = mean - 1.5 * rms;
-        float fit_max = mean + 1.5 * rms;
-        TF1* rough_fit = new TF1("rough_fit", "gaus", fit_min, fit_max);
-        auto fit_result = hist->Fit(rough_fit, "RQS");
-        if (fit_result->Status() != 0) {
-            std::cout << Form("Channel %d: Initial fit failed, skipping...", channel) << std::endl;
+    int n_tot = 0;
+    if (use_hybrid_tot)
+    {
+        n_tot = leaf_tot->GetLen();
+        if (n_tot != n_adc)
+        {
+            std::cerr << "Warning: tot length differs from adc (n_tot=" << n_tot << " n_adc=" << n_adc
+                      << "). Falling back to ADC-only.\n";
+            use_hybrid_tot = false;
+        }
+    }
+
+    const int nch_from_file = n_adc / SAMPLES_PER_CHANNEL;
+
+    std::vector<uint32_t> adc_buf((size_t)n_adc);
+    std::vector<uint32_t> tot_buf;
+    if (use_hybrid_tot)
+        tot_buf.resize((size_t)n_adc);
+
+    tree->SetBranchAddress("adc", adc_buf.data());
+    if (use_hybrid_tot)
+        tree->SetBranchAddress("tot", tot_buf.data());
+
+    auto adc_at = [&](int ch, int t) -> uint32_t &
+    {
+        return adc_buf[(size_t)ch * SAMPLES_PER_CHANNEL + (size_t)t];
+    };
+    auto tot_at = [&](int ch, int t) -> uint32_t &
+    {
+        return tot_buf[(size_t)ch * SAMPLES_PER_CHANNEL + (size_t)t];
+    };
+
+    // ---- Build reverse map: channel -> (crystal, sipm)
+    std::unordered_map<int, std::pair<int, int>> reverse;
+    reverse.reserve(mapping.size() * SIPMS_PER_CRYSTAL);
+
+    for (const auto &kv : mapping)
+    {
+        const int crystal_id = kv.first;
+        auto chans = get_crystal_channels(mapping, crystal_id, SIPMS_PER_CRYSTAL);
+
+        for (int sipm = 0; sipm < SIPMS_PER_CRYSTAL; ++sipm)
+        {
+            const int ch = chans[sipm];
+            if (ch < 0)
+                continue;
+            reverse[ch] = {crystal_id, sipm};
+        }
+    }
+
+    // ---- Create per-(crystal,sipm) histograms only for crystals in mapping
+    std::map<int, std::array<TH1F *, SIPMS_PER_CRYSTAL>> h_adc;
+    std::map<int, std::array<TH1F *, SIPMS_PER_CRYSTAL>> h_tot;
+
+    for (const auto &kv : mapping)
+    {
+        const int crystal_id = kv.first;
+        for (int sipm = 0; sipm < SIPMS_PER_CRYSTAL; ++sipm)
+        {
+            h_adc[crystal_id][sipm] = new TH1F(
+                Form("h_adc_%.2fV_cr%d_sipm%d", voltage, crystal_id, sipm),
+                Form("ADC-only | %.2f V | crystal %d | sipm %d;Signal;Counts", voltage, crystal_id, sipm),
+                200, 0, 1024);
+
+            h_tot[crystal_id][sipm] = new TH1F(
+                Form("h_tot_%.2fV_cr%d_sipm%d", voltage, crystal_id, sipm),
+                Form("ToT-used | %.2f V | crystal %d | sipm %d;Signal;Counts", voltage, crystal_id, sipm),
+                200, 0, 1024);
+        }
+    }
+
+    // ---- Active channels (like led_analysis)
+    // Use max_channels = nch_from_file so it adapts to 1 KCU vs many
+    auto active_channels = get_active_channels_from_mapping(mapping, SIPMS_PER_CRYSTAL, MAX_NUM_CRYSTALS, nch_from_file);
+
+    // ---- Event loop: loop active channels, route via reverse map
+    const Long64_t nEntries = tree->GetEntries();
+    for (Long64_t ev = 0; ev < nEntries; ++ev)
+    {
+        tree->GetEntry(ev);
+
+        for (int ch : active_channels)
+        {
+            if (ch < 0 || ch >= nch_from_file)
+                continue;
+
+            auto it = reverse.find(ch);
+            if (it == reverse.end())
+                continue;
+
+            const int crystal_id = it->second.first;
+            const int sipm = it->second.second;
+
+            float sig = 0.0f;
+            bool used_tot = false;
+
+            if (use_hybrid_tot)
+            {
+                // Build pointers to the start of this channel waveform (20 samples)
+                uint32_t *adc_ptr = &adc_at(ch, 0);
+                uint32_t *tot_ptr = &tot_at(ch, 0);
+
+                calculate_signal_hybrid(adc_ptr, tot_ptr, 1.0f, sig, used_tot);
+
+                if (used_tot)
+                    h_tot[crystal_id][sipm]->Fill(sig);
+                else
+                    h_adc[crystal_id][sipm]->Fill(sig);
+            }
+            else
+            {
+                // Pure ADC mode: everything is ADC
+                uint32_t *adc_ptr = &adc_at(ch, 0);
+
+                sig = calculate_signal_adc(adc_ptr, 1.0f);
+
+                // In ADC-only mode
+                h_adc[crystal_id][sipm]->Fill(sig);
+            }
+        }
+    }
+
+    // ---- Fit peaks, compute gain factors
+    // We'll store results in arrays indexed by (crystal_id,sipm), and also in a "global index" = crystal*16+sipm for legacy plots.
+    std::map<int, std::array<float, SIPMS_PER_CRYSTAL>> peak;
+    std::map<int, std::array<float, SIPMS_PER_CRYSTAL>> sigma;
+
+    for (const auto &kv : mapping)
+    {
+        const int crystal_id = kv.first;
+        for (int sipm_i = 0; sipm_i < SIPMS_PER_CRYSTAL; ++sipm_i)
+        {
+            float pk = 0, sg = 0;
+            TH1F *hist = h_adc[crystal_id][sipm_i];
+            bool ok = fit_peak_crystalball(hist, pk, sg);
+            peak[crystal_id][sipm_i] = ok ? pk : 0.0f;
+            sigma[crystal_id][sipm_i] = ok ? sg : 0.0f;
+        }
+    }
+
+    // Crystal mean peak
+    std::map<int, float> crystal_mean;
+    for (const auto &kv : mapping)
+    {
+        const int crystal_id = kv.first;
+        float sum = 0.0f;
+        int n = 0;
+
+        for (int sipm_i = 0; sipm_i < SIPMS_PER_CRYSTAL; ++sipm_i)
+        {
+            if (exclude_from_crystal_mean(crystal_id, sipm_i))
+                continue;
+            const float pk = peak[crystal_id][sipm_i];
+            if (pk <= 0)
+                continue;
+            sum += pk;
+            n++;
+        }
+
+        crystal_mean[crystal_id] = (n > 0) ? (sum / n) : 0.0f;
+        std::cout << Form("Crystal %d mean peak: %.1f\n", crystal_id, crystal_mean[crystal_id]);
+    }
+
+    // Channel gain factors: crystal_mean / channel_peak
+    std::map<int, std::array<float, SIPMS_PER_CRYSTAL>> gain_factor;
+    for (const auto &kv : mapping)
+    {
+        const int crystal_id = kv.first;
+        for (int sipm_i = 0; sipm_i < SIPMS_PER_CRYSTAL; ++sipm_i)
+        {
+            const float pk = peak[crystal_id][sipm_i];
+            const float cm = crystal_mean[crystal_id];
+            if (pk > 0 && cm > 0)
+                gain_factor[crystal_id][sipm_i] = cm / pk;
+            else
+                gain_factor[crystal_id][sipm_i] = 1.0f;
+        }
+    }
+
+    // Optional: per-crystal equalization
+    float mean_across_crystals = 0.0f;
+    int ncr_good = 0;
+    for (const auto &kv : crystal_mean)
+    {
+        const int crystal_id = kv.first;
+        const float cm = kv.second;
+        if (cm <= 0)
             continue;
-            peak_locations[channel] = 0;
-        }
-        float peak = rough_fit->GetParameter(1);
-        float sigma = rough_fit->GetParameter(2);
-        rough_fit->SetLineColor(kBlue);
-        rough_fit->SetLineStyle(2);
+        if (crystal_id == 9)
+            continue; // keep your "bad crystal" exclusion
+        mean_across_crystals += cm;
+        ncr_good++;
+    }
+    if (ncr_good > 0)
+        mean_across_crystals /= ncr_good;
 
-        TF1* second_fit = new TF1("second_fit", "gaus", peak - sigma, peak + sigma);
-        hist->Fit(second_fit, "RQ");
-        peak = second_fit->GetParameter(1);
-        sigma = second_fit->GetParameter(2);
-
-        TF1* final_fit = new TF1("final_fit", "crystalball", peak - sigma, peak + sigma);
-        final_fit->SetParameters(second_fit->GetParameter(0), peak, sigma, 1.5, 2.0);
-        hist->Fit(final_fit, "RMQ");
-
-        peak_locations[channel] = final_fit->GetParameter(1);
+    std::map<int, float> crystal_gain;
+    for (const auto &kv : crystal_mean)
+    {
+        const int crystal_id = kv.first;
+        const float cm = kv.second;
+        crystal_gain[crystal_id] = (cm > 0) ? (mean_across_crystals / cm) : 1.0f;
     }
 
-    // Print the average peak location
-    float total_peak = 0.0f;
-    int count = 0;
-    for (float peak : peak_locations) {
-        if (peak > 0) {
-            total_peak += peak;
-            count++;
-        }
-    }
-    float average_peak = total_peak / count;
-    std::cout << "Average Peak Location: " << average_peak << std::endl;
+    // lambda function Force dead channels to 0 (same as original) IF those crystals exist in mapping
+    auto zero_if_present = [&](int crystal_id, int sipm_i)
+    {
+        auto it = gain_factor.find(crystal_id);
+        if (it == gain_factor.end())
+            return;
+        if (sipm_i < 0 || sipm_i >= SIPMS_PER_CRYSTAL)
+            return;
+        it->second[sipm_i] = 0.0f;
+    };
 
-    // Calculate the mean signal per crystal
-    std::vector<float> crystal_mean;
-    for (int crystal = 0; crystal < 25; crystal++) {
-        float mean_peak = 0;
-        int ch_used = 0;
-        for (int sipm = 0; sipm < 16; sipm++) {
-            if ((crystal == 21) && (sipm == 1 || sipm == 4 || sipm == 10 || sipm == 11 || sipm == 13 || sipm == 14 || sipm == 15)) {    // Dead channels
-                continue;
-            }
-            if (crystal == 15 && (sipm == 10 || sipm == 0 || sipm == 4 || sipm == 13 || sipm == 11)) {  // Looks very weird...
-                continue;
-            }
-            mean_peak += peak_locations[crystal * 16 + sipm];
-            ch_used++;
-        }
-        mean_peak /= ch_used;
-        crystal_mean.push_back(mean_peak);
-        std::cout << Form("Crystal %d peak: %.0f", crystal, mean_peak) << std::endl;
-    }
+    zero_if_present(15, 10);
+    zero_if_present(21, 1);
+    zero_if_present(21, 4);
+    zero_if_present(21, 10);
+    zero_if_present(21, 11);
+    zero_if_present(21, 13);
+    zero_if_present(21, 14);
+    zero_if_present(21, 15);
 
-    // Calculate the gain factors
-    std::vector<float> gain_factors(400);
-    if (false) {
-        float target = 1300;//average_peak;
-        for (int i = 0; i < peak_locations.size(); i++) {
-            if (peak_locations[i] > 0) {
-                gain_factors[i] = target / peak_locations[i];
-            } else {
-                gain_factors[i] = 1.0f; // Default factor if no peak
-            }
-        }
-    }
-    if (true) {
-        for (int crystal = 0; crystal < 25; crystal++) {
-            for (int sipm = 0; sipm < 16; sipm++) {
-                int channel = crystal * 16 + sipm;
-                if (peak_locations[channel] > 0) {
-                    gain_factors[channel] = crystal_mean[crystal] / peak_locations[channel];
-                } else {
-                    gain_factors[channel] = 1;
-                }
-            }
-        }
-    }
+    // ---- Output names (include run label from filename and voltage)
+    std::string base = std::string(Form("gain_match_%.2fV", voltage));
+    std::string pdf_file = std::string(Form("%s/%s.pdf", outdir, base.c_str()));
+    std::string root_file = std::string(Form("%s/%s.root", outdir, base.c_str()));
 
-    // Calculate per crystal gain factors
-    float mean_crystal_signal = 0;
-    for (int crystal = 0; crystal < 25; crystal++) {
-        if (crystal == 9) {
-            continue; // Bad crystal
-        }
-        mean_crystal_signal += crystal_mean[crystal];
-    }
-    mean_crystal_signal /= 24;
-    std::cout << Form("Mean across all crystals: %.0f", mean_crystal_signal);
-    std::vector<float> crystal_gain;
-    for (int crystal = 0; crystal < 25; crystal++) {
-        if (crystal_mean[crystal] > 0) {
-            crystal_gain.push_back(mean_crystal_signal / crystal_mean[crystal]);
-        } else {
-            crystal_gain.push_back(1);
-        }
-    }
+    // ---- Save PDF: one page per crystal in mapping (4x4 SiPMs)
+    TLatex text;
+    text.SetNDC();
+    text.SetTextSize(0.04);
+    text.SetTextFont(42);
 
-    gain_factors[15 * 16 + 10] = 0; // Crystal 15 SiPM 10
-    gain_factors[21 * 16 + 1] = 0; // Crystal 21 SiPM 1
-    gain_factors[21 * 16 + 4] = 0; // Crystal 21 SiPM 4
-    gain_factors[21 * 16 + 10] = 0; // Crystal 21 SiPM 10
-    gain_factors[21 * 16 + 11] = 0; // Crystal 21 SiPM 11
-    gain_factors[21 * 16 + 13] = 0; // Crystal 21 SiPM 13
-    gain_factors[21 * 16 + 14] = 0; // Crystal 21 SiPM 14
-    gain_factors[21 * 16 + 15] = 0; // Crystal 21 SiPM 15
+    TCanvas *canvas = new TCanvas("gain_matching", "", 900, 700);
 
-    // Save all histograms to a single PDF
-    const char* output_file = "output/gain_matching.pdf";
-    TLatex *text = new TLatex();
-    text->SetNDC();
-    text->SetTextSize(0.04);
-    text->SetTextFont(42);
-    TCanvas* canvas = new TCanvas("gain_matching", "", 800, 600);
-    for (int crystal = 0; crystal < run_crystal.size(); crystal++) {
+    canvas->SaveAs((pdf_file + "[").c_str());
+
+    for (const auto &kv : mapping)
+    {
+        const int crystal_id = kv.first;
+
         canvas->Clear();
         canvas->Divide(4, 4);
-        for (int sipm = 0; sipm < 16; sipm++) {
-            canvas->cd(sipm + 1);
-            auto hist = histograms[crystal * 16 + sipm];
-            hist->Draw();
-            text->DrawLatex(0.15, 0.85, Form("Channel %d", crystal * 16 + sipm));
-            text->DrawLatex(0.15, 0.80, Form("Ch gain: %.2f", gain_factors[crystal * 16 + sipm]));
-            text->DrawLatex(0.15, 0.75, Form("Crystal gain: %.2f", crystal_gain[crystal]));
+
+        for (int sipm_i = 0; sipm_i < SIPMS_PER_CRYSTAL; ++sipm_i)
+        {
+            canvas->cd(sipm_i + 1);
+            TH1F *hist = h_adc[crystal_id][sipm_i];
+            if (hist)
+                hist->Draw();
+
+            text.DrawLatex(0.15, 0.83, Form("%.2f V", voltage));
+            text.DrawLatex(0.15, 0.78, Form("Crystal %d SiPM %d", crystal_id, sipm_i));
+            text.DrawLatex(0.15, 0.73, Form("Peak: %.1f", peak[crystal_id][sipm_i]));
+            text.DrawLatex(0.15, 0.68, Form("Ch gain: %.2f", gain_factor[crystal_id][sipm_i]));
+            text.DrawLatex(0.15, 0.63, Form("Cr gain: %.2f", crystal_gain[crystal_id]));
         }
-        if (crystal == 0) {
-            canvas->SaveAs(Form("%s(", output_file));
-        } else {
-            canvas->SaveAs(output_file);
+
+        canvas->SaveAs(pdf_file.c_str());
+    }
+
+    // ---- Summary gain histograms (legacy indexing: crystal*16 + sipm)
+    // Keep 400 bins so it matches old plots; fill only what is present.
+    TH1F *gain_hist = new TH1F("gain_factors", "Gain Factors;crystal*16+sipm;Gain Factor", 25 * 16, 0, 25 * 16);
+    TH1F *crystal_gain_hist = new TH1F("crystal_factor", "Crystal Gain;Crystal;Gain Factor", 25, 0, 25);
+
+    for (int cr = 0; cr < MAX_NUM_CRYSTALS; ++cr)
+        crystal_gain_hist->SetBinContent(cr + 1, 1.0f);
+
+    for (const auto &kv : mapping)
+    {
+        const int crystal_id = kv.first;
+        if (crystal_id >= 0 && crystal_id < MAX_NUM_CRYSTALS)
+            crystal_gain_hist->SetBinContent(crystal_id + 1, crystal_gain[crystal_id]);
+
+        for (int sipm_i = 0; sipm_i < SIPMS_PER_CRYSTAL; ++sipm_i)
+        {
+            const int idx = crystal_id * SIPMS_PER_CRYSTAL + sipm_i;
+            if (idx >= 0 && idx < MAX_NUM_CRYSTALS * SIPMS_PER_CRYSTAL)
+                gain_hist->SetBinContent(idx + 1, gain_factor[crystal_id][sipm_i]);
         }
     }
 
     canvas->Clear();
-
-
-    // Make a histogram of gain factors
-    TH1F* gain_hist = new TH1F("gain_factors", "Gain Factors;Channel;Gain Factor", 400, 0, 400);
-    for (int channel = 0; channel < gain_factors.size(); channel++) {
-        gain_hist->SetBinContent(channel + 1, gain_factors[channel]);
-        gain_hist->SetBinError(channel + 1, 0.0001);
-        std::cout << "Channel " << channel << ": Gain Factor = " << gain_factors[channel] << std::endl;
-    }
-
     gain_hist->SetMinimum(0);
-    gain_hist->SetMaximum(2);
-    gain_hist->Draw("e");
-    canvas->SaveAs(Form("%s", output_file));
-    
-    TH1F* crystal_gain_hist = new TH1F("crystal_factor", "Crystal Gain;Crystal;Gain Factor", 25, 0, 25);
-    for (int crystal = 0; crystal < 25; crystal++) {
-        crystal_gain_hist->SetBinContent(crystal + 1, crystal_gain[crystal]);
-        crystal_gain_hist->SetBinError(crystal + 1, 0.0001);
-        std::cout << "Crystal " << crystal << ": Gain Factor = " << crystal_gain[crystal] << std::endl;
-    }
-    crystal_gain_hist->SetMinimum(0);
-    crystal_gain_hist->SetMaximum(2);
-    crystal_gain_hist->Draw("e");
-    canvas->SaveAs(Form("%s)", output_file));
+    gain_hist->SetMaximum(gain_hist->GetMaximum() * 1.2);
 
-    
-    
-    TFile* out_root = new TFile("output/gain_factors.root", "RECREATE");
+    gain_hist->Draw();
+    canvas->SaveAs(pdf_file.c_str());
+
+    canvas->Clear();
+    crystal_gain_hist->SetMinimum(0);
+    crystal_gain_hist->SetMaximum(crystal_gain_hist->GetMaximum() * 1.2);
+
+    crystal_gain_hist->Draw();
+    canvas->SaveAs((pdf_file + "]").c_str());
+
+    std::cout << "Saved PDF:  " << pdf_file << "\n";
+
+    // ---- Save ROOT: gain histograms + a TTree with detailed per-channel info
+    TFile *out = new TFile(root_file.c_str(), "RECREATE");
     gain_hist->Write();
     crystal_gain_hist->Write();
-    out_root->Close();
+
+    TTree *t = new TTree("gain_table", "Gain match results");
+    int t_crystal = 0, t_sipm = 0, t_channel = 0;
+    float t_peak = 0, t_sigma = 0, t_cr_mean = 0, t_gain = 1, t_cr_gain = 1;
+
+    t->Branch("crystal", &t_crystal, "crystal/I");
+    t->Branch("sipm", &t_sipm, "sipm/I");
+    t->Branch("channel", &t_channel, "channel/I");
+    t->Branch("peak", &t_peak, "peak/F");
+    t->Branch("sigma", &t_sigma, "sigma/F");
+    t->Branch("crystal_mean", &t_cr_mean, "crystal_mean/F");
+    t->Branch("gain", &t_gain, "gain/F");
+    t->Branch("crystal_gain", &t_cr_gain, "crystal_gain/F");
+
+    for (const auto &kv : mapping)
+    {
+        const int crystal_id = kv.first;
+        auto chans = get_crystal_channels(mapping, crystal_id, SIPMS_PER_CRYSTAL);
+
+        for (int sipm_i = 0; sipm_i < SIPMS_PER_CRYSTAL; ++sipm_i)
+        {
+            t_crystal = crystal_id;
+            t_sipm = sipm_i;
+            t_channel = (sipm_i < (int)chans.size()) ? chans[sipm_i] : -1;
+
+            t_peak = peak[crystal_id][sipm_i];
+            t_sigma = sigma[crystal_id][sipm_i];
+            t_cr_mean = crystal_mean[crystal_id];
+            t_gain = gain_factor[crystal_id][sipm_i];
+            t_cr_gain = crystal_gain[crystal_id];
+
+            t->Fill();
+        }
+    }
+
+    t->Write();
+    out->Close();
+    delete out;
+
+    std::cout << "Saved ROOT: " << root_file << "\n";
+
+    // ---- Cleanup
+    delete canvas;
+    delete gain_hist;
+    delete crystal_gain_hist;
+
+    for (auto &kv : h_adc)
+        for (TH1F *h : kv.second)
+            delete h;
+    for (auto &kv : h_tot)
+        for (TH1F *h : kv.second)
+            delete h;
+
+    file->Close();
+    delete file;
+}
+
+// ------------------------------------------------------------
+// Scan like led_scan list (run, voltage)
+// (uses data/Run%03d.root)
+// ------------------------------------------------------------
+void gain_scan(const char *data_dir = "data",
+               const char *mapping_csv = "eeemcal_desy_dec2025_mapping_v2.csv",
+               const char *outdir = "outputs",
+               bool use_hybrid_tot = true)
+{
+    std::vector<std::pair<int, float>> runs = {
+        {23, 0.0f},
+        {26, 1.2f},
+        {30, 1.22f},
+        {33, 1.24f},
+        {36, 1.25f},
+        {39, 1.26f},
+        {42, 1.27f},
+        {45, 1.28f},
+        {48, 1.29f},
+        {51, 1.30f} //,
+        // {54, 1.32f},
+        // {57, 1.33f},
+        // {60, 1.34f},
+        // {63, 1.36f},
+        // {66, 1.37f},
+        // {69, 1.38f},
+        // {72, 1.40f},
+        // {75, 1.42f},
+        // {78, 1.44f},
+        // {81, 1.46f},
+        // {84, 1.48f},
+        // {87, 1.50f},
+        // {90, 1.52f},
+        // {93, 1.54f},
+        // {96, 1.56f},
+        // {99, 1.58f},
+        // {102, 1.60f},
+        // {105, 1.62f},
+        // {108, 1.64f},
+        // {111, 1.66f},
+        // {114, 1.68f},
+        // {117, 1.70f},
+        // {120, 1.72f},
+        // {123, 1.74f},
+        // {126, 1.76f},
+        // {129, 1.78f},
+        // {132, 1.80f},
+        // {135, 1.82f},
+        // {138, 1.84f},
+        // {141, 1.86f},
+        // {144, 1.88f}
+    };
+
+    for (auto &rv : runs)
+    {
+        const int run = rv.first;
+        const float v = rv.second;
+
+        std::string fn = std::string(Form("%s/Run%03d.root", data_dir, run));
+        std::cout << "\n--- Gain match: " << fn << " @ " << v << " V ---\n";
+        gain_match_one(fn.c_str(), v, mapping_csv, outdir, use_hybrid_tot);
+    }
 }
