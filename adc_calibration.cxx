@@ -10,14 +10,22 @@
 //   and produces an "ADC per reference unit" calibration.
 //
 // Reference unit: voltage = 1.27 V (instead of 1 GeV)
-//
-// Run examples:
-//   root -l -q 'common_led.cxx+ adc_calibration.cxx+ adc_calibration_one("data/Run042.root", 1.27)'
-//   root -l -q 'common_led.cxx+ adc_calibration.cxx+ adc_calibration_one("data/Run042.root", 1.27, "eeemcal_desy_dec2025_mapping_v2.csv", "outputs/gain_match_1.27V.root", "outputs")'
+// TO RUN automatically on a list of runs/voltages, use adc_calib_scan() and for cm and not cm:
 // root -l -b
 // .L common_led.cxx+
 // .L adc_calibration.cxx+
-// adc_calibration_one("data/Run042.root", 1.27, "eeemcal_desy_dec2025_mapping_v2.csv", "outputs/gain_match_1.27V.root", "outputs")
+// adc_calib_scan("data", "eeemcal_desy_dec2025_mapping_v2.csv", true);
+//
+// Run examples:
+//   root -l -q 'common_led.cxx+ adc_calibration.cxx+ adc_calibration_one("data/Run042.root", 1.27)'
+//   root -l -q 'common_led.cxx+ adc_calibration.cxx+ adc_calibration_one("data/Run042.root", 1.27, "eeemcal_desy_dec2025_mapping_v2.csv", "outputs/gain_match_1.27V.root", "outputs", 1000000, 0.0, true, true, 470.0)'
+// root -l -b
+// .L common_led.cxx+
+// .L adc_calibration.cxx+
+// ## if common mode true
+// adc_calibration_one("data/Run042.root", 1.27, "eeemcal_desy_dec2025_mapping_v2.csv", "outputs/gain_match_1.27V.root", "outputs_cm_adc", 1000000, 0.0, true, true, 470.0)
+// ## if common mode false
+// adc_calibration_one("data/Run042.root", 1.27, "eeemcal_desy_dec2025_mapping_v2.csv", "outputs/gain_match_1.27V.root", "outputs", 1000000, 0.0, true, false, 470.0)
 //
 
 #include "common_led.h"
@@ -57,6 +65,17 @@
 static constexpr int SAMPLES_PER_CHANNEL = 20;
 static constexpr int SIPMS_PER_CRYSTAL = 16;
 static constexpr int MAX_NUM_CRYSTALS = 25;
+static constexpr double WAVELENGTH_NM = 470.0; // for photon energy conversion
+
+// Photon energy helpers (for bookkeeping / optional conversions)
+// E_photon [eV] = (h*c)/lambda, with (h*c) = 1239.841984 eV*nm
+
+static constexpr double HC_EV_NM = 1239.841984;
+// static constexpr double EV_TO_J = 1.602176634e-19;
+static inline double photon_energy_eV(double wavelength_nm)
+{
+    return (wavelength_nm > 0.0) ? (HC_EV_NM / wavelength_nm) : (HC_EV_NM / WAVELENGTH_NM);
+}
 
 // ---------------------- small helpers ----------------------
 
@@ -213,7 +232,8 @@ void adc_calibration_one(const char *filename,
                          Long64_t max_events = 1000000,
                          float energy_fraction_cut = 0.0f,
                          bool use_hybrid_tot = true,
-                         bool use_common_mode = true)
+                         bool use_common_mode = true,
+                         float led_wavelength_nm = 470.0f)
 {
     gStyle->SetOptStat(0);
     gErrorIgnoreLevel = kWarning;
@@ -224,6 +244,10 @@ void adc_calibration_one(const char *filename,
     g_tot_min = 50;
 
     const float REF_VOLTAGE = voltage;
+
+    const float LED_WAVELENGTH_NM = (led_wavelength_nm > 0.0f) ? led_wavelength_nm : 470.0f;
+    const double EPHOTON_EV = photon_energy_eV((double)LED_WAVELENGTH_NM);
+    // const double EPHOTON_J  = EPHOTON_EV * EV_TO_J;
 
     // Per-crystal common-mode reference channels
     // int common_mode_channels_by_crystal[MAX_NUM_CRYSTALS] = {
@@ -535,7 +559,7 @@ void adc_calibration_one(const char *filename,
         tree->GetEntry(entry);
 
         std::unordered_map<int, float> cm_cache;
-        std::unordered_map<int, bool> cm_ok;  
+        std::unordered_map<int, bool> cm_ok;
 
         bool is_tot = false;
 
@@ -827,7 +851,7 @@ void adc_calibration_one(const char *filename,
         3, 8, 13, 18, 23,
         2, 7, 12, 17, 22,
         1, 6, 11, 16, 21,
-        0, 5, 10, 15, 20};
+        0, 5, 10, 15, 20}; // crystal 9 excluded from calibration because it has weid behavior in many runs
 
     std::vector<float> ref_calib;
     float mean_calib = 0.0f;
@@ -856,6 +880,39 @@ void adc_calibration_one(const char *filename,
         mean_calib /= n_used;
     std::cout << "Reference calibration (" << REF_VOLTAGE << " V defined as 1 unit): " << mean_calib << "\n";
 
+    // ---------------- central-crystal energy resolution (at REF_VOLTAGE) ----------------
+    double e_mu = 0.0;
+    double e_sigma = 0.0;
+    double e_res = 0.0; // sigma/mu
+    bool e_fit_ok = false;
+
+    if (central_crystal_energy && central_crystal_energy->GetEntries() > 50 && central_crystal_energy->GetRMS() > 0)
+    {
+        const double mean0 = central_crystal_energy->GetBinCenter(central_crystal_energy->GetMaximumBin());
+        const double rms0 = std::max(50.0, central_crystal_energy->GetRMS());
+        const double fmin = std::max(0.0, mean0 - 1.5 * rms0);
+        const double fmax = mean0 + 1.5 * rms0;
+
+        TF1 fE(Form("central_energy_gaus_run%03d_%.2fV", run, REF_VOLTAGE), "gaus", fmin, fmax);
+        fE.SetParameters(central_crystal_energy->GetMaximum(), mean0, rms0);
+
+        TFitResultPtr rr = central_crystal_energy->Fit(&fE, "RQS"); // stores fit on hist
+
+        if (rr.Get() && rr->Status() == 0)
+        {
+            e_mu = fE.GetParameter(1);
+            e_sigma = std::abs(fE.GetParameter(2));
+            e_res = (e_mu != 0.0) ? (e_sigma / e_mu) : 0.0;
+            e_fit_ok = true;
+        }
+    }
+
+    std::cout << "Central crystal energy peak @ " << REF_VOLTAGE
+              << " V: mean=" << e_mu
+              << " sigma=" << e_sigma
+              << " resolution=" << 100.0 * e_res << " %"
+              << (e_fit_ok ? "" : " (fit failed)") << "\n";
+
     // ---------------- save outputs ----------------
     int run_out = extract_run_number(filename);
 
@@ -868,6 +925,8 @@ void adc_calibration_one(const char *filename,
     canvas->SaveAs((pdf + "[").c_str());
 
     central_crystal_energy->Draw("hist e");
+    if (TF1 *f = central_crystal_energy->GetFunction(Form("central_energy_gaus_run%03d_%.2fV", run_out, REF_VOLTAGE)))
+        f->Draw("same");
     canvas->SaveAs(pdf.c_str());
 
     central_nine_energy->Draw("hist e");
@@ -918,7 +977,7 @@ void adc_calibration_one(const char *filename,
 
     // pedestal widths
     canvas->Clear();
-    TH1F *pedestals_width = new TH1F("pedestals_width", "Pedestal Width vs Channel;Channel;Width (ADC)",
+    TH1F *pedestals_width = new TH1F("pedestals_width", "Pedestal Width (#sigma) vs Channel;Channel;Width #sigma (ADC)",
                                      n_channels, 0, n_channels);
 
     for (int ch = 0; ch < n_channels; ++ch)
@@ -970,6 +1029,7 @@ void adc_calibration_one(const char *filename,
         canvas->cd(i + 1);
         int cr = crystal_mapping_for_plots[i];
 
+        crystal_energy_shares[cr]->SetLineColor(kRed);
         crystal_energy_shares[cr]->Draw("hist e");
         crystal_energy_shares[cr]->GetXaxis()->SetRangeUser(0.001, 1);
         gPad->SetLogx();
@@ -1089,8 +1149,12 @@ void adc_calibration_one(const char *filename,
     t.DrawLatex(0.12, 0.82, Form("Run: %03d   Voltage label: %.2f V", run_out, voltage));
     t.DrawLatex(0.12, 0.76, Form("Reference unit: %.2f V (defined as 1 unit)", REF_VOLTAGE));
     t.DrawLatex(0.12, 0.70, Form("Mean ADC per ref unit: %.2f", mean_calib));
-    t.DrawLatex(0.12, 0.64, Form("ToT mode used: %s", use_hybrid_tot ? "hybrid ADC/ToT" : "ADC-only"));
-    t.DrawLatex(0.12, 0.58, Form("Common-mode subtraction: %s", use_common_mode ? "enabled" : "disabled"));
+    // t.DrawLatex(0.12, 0.66, Form("LED wavelength: %.1f nm  (E_{#gamma}=%.3f eV = %.3g J)", LED_WAVELENGTH_NM, EPHOTON_EV, EPHOTON_J));
+    t.DrawLatex(0.12, 0.64, Form("LED wavelength: %.1f nm  (E_{#gamma}=%.3f eV)", LED_WAVELENGTH_NM, EPHOTON_EV));
+    t.DrawLatex(0.12, 0.58, Form("ToT mode used: %s", use_hybrid_tot ? "hybrid ADC/ToT" : "ADC-only"));
+    t.DrawLatex(0.12, 0.52, Form("Common-mode subtraction: %s", use_common_mode ? "enabled" : "disabled"));
+    t.DrawLatex(0.12, 0.46, Form("Central energy res (sigma/mu): %.2f%%", 100.0 * e_res));
+
     canvas->SaveAs(pdf.c_str());
 
     canvas->SaveAs((pdf + "]").c_str());
@@ -1101,6 +1165,27 @@ void adc_calibration_one(const char *filename,
     TFile *out = TFile::Open(root_out.c_str(), "RECREATE");
     TParameter<float> p(Form("mean_adc_to_ref_calibration_%.2fV", REF_VOLTAGE), mean_calib);
     p.Write();
+
+    // Resolution parameters for the reference voltage peak
+    TParameter<float> p_mu(Form("central_energy_mu_%.2fV", REF_VOLTAGE), (float)e_mu);
+    TParameter<float> p_sigma(Form("central_energy_sigma_%.2fV", REF_VOLTAGE), (float)e_sigma);
+    TParameter<float> p_res(Form("central_energy_res_%.2fV", REF_VOLTAGE), (float)e_res);
+    TParameter<float> p_res_pct(Form("central_energy_res_pct_%.2fV", REF_VOLTAGE), (float)(100.0 * e_res));
+    TParameter<int> p_fitok(Form("central_energy_fit_ok_%.2fV", REF_VOLTAGE), (int)e_fit_ok);
+
+    p_mu.Write();
+    p_sigma.Write();
+    p_res.Write();
+    p_res_pct.Write();
+    p_fitok.Write();
+
+    // Bookkeeping: LED wavelength and photon energy (useful if to obtain an optical-energy equivalent)
+    TParameter<float> p_led_wavelength_nm("led_wavelength_nm", LED_WAVELENGTH_NM);
+    TParameter<double> p_photon_energy_eV("photon_energy_eV", EPHOTON_EV);
+    // TParameter<double> p_photon_energy_J("photon_energy_J", EPHOTON_J);
+    p_led_wavelength_nm.Write();
+    p_photon_energy_eV.Write();
+    // p_photon_energy_J.Write();
 
     central_crystal_energy->Write();
     central_nine_energy->Write();
@@ -1155,4 +1240,71 @@ void adc_calibration_one(const char *filename,
     delete f;
 
     delete canvas;
+}
+
+// ------------------------------------------------------------
+// Scan like led_scan list (run, voltage)
+// (uses data/Run%03d.root)
+// ------------------------------------------------------------
+
+void adc_calib_scan(const char *data_dir = "data",
+                    const char *mapping_csv = "eeemcal_desy_dec2025_mapping_v2.csv",
+                    //    const char *outdir = "outputs",
+                    bool use_hybrid_tot = true)
+{
+    std::vector<std::pair<int, float>> runs = {
+        // {23, 0.0f},
+        // {26, 1.2f},
+        // {30, 1.22f},
+        // {33, 1.24f},
+        // {36, 1.25f},
+        // {39, 1.26f},
+        {42, 1.27f} //,
+        // {45, 1.28f},
+        // {48, 1.29f},
+        // {51, 1.30f},
+        // {54, 1.32f},
+        // {57, 1.33f},
+        // {60, 1.34f},
+        // {63, 1.36f},
+        // {66, 1.37f},
+        // {69, 1.38f},
+        // {72, 1.40f},
+        // {75, 1.42f},
+        // {78, 1.44f},
+        // {81, 1.46f},
+        // {84, 1.48f},
+        // {87, 1.50f},
+        // {90, 1.52f},
+        // {93, 1.54f},
+        // {96, 1.56f},
+        // {99, 1.58f},
+        // {102, 1.60f},
+        // {105, 1.62f},
+        // {108, 1.64f},
+        // {111, 1.66f},
+        // {114, 1.68f},
+        // {117, 1.70f},
+        // {120, 1.72f},
+        // {123, 1.74f},
+        // {126, 1.76f},
+        // {129, 1.78f},
+        // {132, 1.80f},
+        // {135, 1.82f},
+        // {138, 1.84f},
+        // {141, 1.86f},
+        // {144, 1.88f}
+    };
+
+    for (auto &rv : runs)
+    {
+        const int run = rv.first;
+        const float v = rv.second;
+
+        std::string fn = std::string(Form("%s/Run%03d.root", data_dir, run));
+        std::cout << "\n--- adc calibration using common mode extraction: " << fn << " @ " << v << " V ---\n";
+        adc_calibration_one(fn.c_str(), v, mapping_csv, "outputs/gain_match_1.27V.root", "outputs_cm_adc", 1000000, 0.0, use_hybrid_tot, true, 470.0);
+        std::cout << "\n--- adc calibration using common mode extraction: " << fn << " @ " << v << " V ---\n";
+        adc_calibration_one(fn.c_str(), v, mapping_csv, "outputs/gain_match_1.27V.root", "outputs", 1000000, 0.0, use_hybrid_tot, false, 470.0);
+    }
 }
