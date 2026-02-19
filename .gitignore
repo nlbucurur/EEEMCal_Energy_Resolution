@@ -23,3 +23,5 @@ out/
 common_led_cxx_ACLiC_*
 gain_match_cxx_ACLiC_*
 adc_calibration_cxx_ACLiC_*
+tot_calibration_cxx_ACLiC_*
+energy_resolution_cxx_ACLiC_*
