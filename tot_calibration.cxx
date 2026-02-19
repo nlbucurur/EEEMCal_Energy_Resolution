@@ -26,6 +26,7 @@
 
 #include "common_led.h"
 
+#include <TString.h>
 #include <map>
 #include <array>
 #include <vector>
@@ -56,6 +57,9 @@
 #include <TParameter.h>
 #include <TKey.h>
 #include <TError.h>
+#include <TROOT.h>
+#include <TGraphErrors.h>
+#include <TProfile.h>
 
 static constexpr int SAMPLES_PER_CHANNEL = 20;
 static constexpr int SIPMS_PER_CRYSTAL = 16;
@@ -306,6 +310,36 @@ static void load_gain_factors(const char *gain_root,
     }
 }
 
+static bool compute_resolution_pct(const TH1 *h,
+                                   double &mean, double &mean_err,
+                                   double &sigma, double &sigma_err,
+                                   double &reso_pct, double &reso_pct_err)
+{
+    if (!h)
+        return false;
+    if (h->GetEntries() < 20)
+        return false;
+
+    mean = h->GetMean();
+    sigma = h->GetRMS();
+    mean_err = h->GetMeanError();
+    sigma_err = h->GetRMSError();
+
+    if (mean <= 0.0 || sigma <= 0.0)
+        return false;
+
+    reso_pct = 100.0 * sigma / mean;
+
+    double rel2 = 0.0;
+    if (sigma_err > 0.0)
+        rel2 += (sigma_err / sigma) * (sigma_err / sigma);
+    if (mean_err > 0.0)
+        rel2 += (mean_err / mean) * (mean_err / mean);
+
+    reso_pct_err = reso_pct * std::sqrt(rel2);
+    return true;
+}
+
 // -----------------------------------------------------------------------------
 // Core: process one run
 // -----------------------------------------------------------------------------
@@ -368,6 +402,7 @@ static bool tot_calibration_one(const char *filename,
         return false;
     }
 
+    tree->GetEntry(0);
     const int n_adc = leaf_adc->GetLen();
     const int n_tot = leaf_tot->GetLen();
     if (n_adc != n_tot || (n_adc % SAMPLES_PER_CHANNEL) != 0)
@@ -588,6 +623,8 @@ void tot_calib_scan(const char *data_dir = "data",
     gROOT->cd();
     gErrorIgnoreLevel = kWarning;
     gStyle->SetOptStat(0);
+    // gStyle->SetPadGridX(true);
+    // gStyle->SetPadGridY(true);
 
     mkdir_p(outdir);
 
@@ -607,6 +644,10 @@ void tot_calib_scan(const char *data_dir = "data",
         std::cerr << "Error: mapping is empty. Check mapping_csv='" << mapping_csv << "'\n";
         return;
     }
+
+    std::vector<double> v_voltage;
+    std::vector<double> v_reso_pct;
+    std::vector<double> v_reso_pct_err;
 
     // ------------------ Calibration dependencies ------------------
     // adc_calibration.cxx writes mean_adc_to_ref_calibration_1.27V into outputs/adc_to_ref_calibration_1.27V.root
@@ -717,6 +758,19 @@ void tot_calib_scan(const char *data_dir = "data",
             std::cerr << "Warning: failed processing " << fn << "\n";
         }
 
+        // double mean = 0, mean_err = 0, sigma = 0, sigma_err = 0, reso = 0, reso_err = 0;
+        // if (compute_resolution_pct(o.tot, mean, mean_err, sigma, sigma_err, reso, reso_err))
+        // {
+        //     v_voltage.push_back((double)label);
+        //     v_reso_pct.push_back(reso);
+        //     v_reso_pct_err.push_back(reso_err);
+        // }
+        // else
+        // {
+        //     std::cerr << "Warning: could not compute resolution for label=" << label
+        //               << " (entries=" << (o.tot ? o.tot->GetEntries() : 0) << ")\n";
+        // }
+
         // Accumulate into global
         total_dist->Add(o.tot2d);
 
@@ -770,6 +824,26 @@ void tot_calib_scan(const char *data_dir = "data",
                           << " sigma=" << o.tot_sigma
                           << " resolution=" << 100.0 * o.tot_res << " %\n";
             }
+
+            const double reso_pct = (o.tot_mu != 0.0) ? 100.0 * (o.tot_sigma / o.tot_mu) : 0.0;
+
+            // simple error propagation using fit parameter errors (if fit exists)
+            double mu_err = 0.0, si_err = 0.0;
+            if (TF1 *ffit = o.tot->GetFunction(Form("tot_sum_gaus_run%03d", runnum)))
+            {
+                mu_err = ffit->GetParError(1);
+                si_err = ffit->GetParError(2);
+            }
+            double reso_err = 0.0;
+            if (o.tot_mu > 0.0 && o.tot_sigma > 0.0)
+            {
+                const double rel2 = (mu_err > 0 ? (mu_err / o.tot_mu) * (mu_err / o.tot_mu) : 0.0) + (si_err > 0 ? (si_err / o.tot_sigma) * (si_err / o.tot_sigma) : 0.0);
+                reso_err = reso_pct * std::sqrt(rel2);
+            }
+
+            v_voltage.push_back((double)label);
+            v_reso_pct.push_back(reso_pct);
+            v_reso_pct_err.push_back(reso_err);
         }
 
         outs.push_back(o);
@@ -880,8 +954,33 @@ void tot_calib_scan(const char *data_dir = "data",
         canvas->SaveAs(pdf.c_str());
     }
 
+    if (v_voltage.size() >= 2)
+    {
+        TCanvas *cRes = new TCanvas("cRes", "Resolution vs Voltage", 900, 700);
+        cRes->SetGrid();
+
+        TGraphErrors *gRes = new TGraphErrors(
+            (int)v_voltage.size(),
+            v_voltage.data(),
+            v_reso_pct.data(),
+            nullptr,
+            v_reso_pct_err.data());
+
+        gRes->SetTitle("ToT resolution vs LED voltage;LED voltage (V);Resolution (#sigma/mean) [%]");
+        gRes->SetMarkerStyle(20);
+        gRes->Draw("AP");
+        cRes->SaveAs(pdf.c_str());
+    }
+    else
+    {
+        std::cerr << "Warning: not enough points to build Resolution vs Voltage graph.\n";
+    }
+
     // global page + fits
     canvas->Clear();
+    //grid to this page
+    gPad->SetGridx();
+    gPad->SetGridy();
     total_dist->Draw("colz");
     canvas->SaveAs(pdf.c_str());
 
@@ -890,25 +989,50 @@ void tot_calib_scan(const char *data_dir = "data",
     canvas->Clear();
     total_invt->Draw("colz");
 
-    float scale_factor = 16.0f / (float)SIPMS_PER_CRYSTAL;
+    // float scale_factor = 16.0f / (float)SIPMS_PER_CRYSTAL;
 
-    TF1 *fit_hi = new TF1("fit_hi", "pol1", 35000.0f / scale_factor, 50000.0f / scale_factor);
-    total_invt->Fit(fit_hi, "RQ");
+    // TF1 *fit_hi = new TF1("fit_hi", "pol1", 35000.0f / scale_factor, 50000.0f / scale_factor);
+    // total_invt->Fit(fit_hi, "RQ");
+    // fit_hi->SetLineColor(kRed);
+
+    // TF1 *fit_mid = new TF1("fit_mid", "pol1", 20000.0f / scale_factor, 26000.0f / scale_factor);
+    // total_invt->Fit(fit_mid, "RQ");
+    // fit_mid->SetLineColor(kGreen + 2);
+
+    // TF1 *fit_all = new TF1("fit_all", "pol2", 20000.0f / scale_factor, 55000.0f / scale_factor);
+    // total_invt->Fit(fit_all, "RQ");
+    // fit_all->SetLineColor(kMagenta);
+
+    // fit_hi->Draw("same");
+    // fit_mid->Draw("same");
+    // fit_all->Draw("same");
+
+
+    //grid this pad
+    gPad->SetGridx();
+    gPad->SetGridy();
+
+    TProfile *p = total_invt->ProfileX("p_label_minus_missing_vs_tot");
+    p->SetTitle("Profile: label-missing vs ToT;ToT;#LT label-missing#GT (V)");
+
+    TF1 *fit_all = new TF1("fit_all", "pol2", 20000, 55000);
+    TF1 *fit_mid = new TF1("fit_mid", "pol1", 14000, 23200);
+    TF1 *fit_hi = new TF1("fit_hi", "pol1", 30000, 60000);
+
     fit_hi->SetLineColor(kRed);
-
-    TF1 *fit_mid = new TF1("fit_mid", "pol1", 20000.0f / scale_factor, 26000.0f / scale_factor);
-    total_invt->Fit(fit_mid, "RQ");
     fit_mid->SetLineColor(kGreen + 2);
+    fit_all->SetLineColor(kOrange);
 
-    TF1 *fit_all = new TF1("fit_all", "pol2", 20000.0f / scale_factor, 55000.0f / scale_factor);
-    total_invt->Fit(fit_all, "RQ");
-    fit_all->SetLineColor(kMagenta);
+    p->Fit(fit_hi, "RQ");
+    p->Fit(fit_mid, "RQ+");
+    p->Fit(fit_all, "RQ+");
 
-    fit_hi->Draw("same");
+    p->Draw();
     fit_mid->Draw("same");
     fit_all->Draw("same");
-
+    fit_hi->Draw("same");
     canvas->SaveAs(pdf.c_str());
+
     canvas->SaveAs((pdf + "]").c_str());
 
     // ------------------ ROOT outputs ------------------
@@ -961,6 +1085,8 @@ void tot_calib_scan(const char *data_dir = "data",
             if (o.per_sipm[sipm])
                 o.per_sipm[sipm]->Write();
     }
+
+    p->Write();
 
     out->Close();
     delete out;
