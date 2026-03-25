@@ -82,7 +82,7 @@ static bool g_use_totcalib_resolution_for_totonly = true; // if central is ToT-o
 
 static bool g_force_tot_override_for_voltage = true; // force ToT override for a specific LED voltage label
 // Force ToT override for specific LED labels (in volts)
-static std::vector<float> g_force_tot_override_voltages = {1.29f};
+static std::vector<float> g_force_tot_override_voltages = {};
 static float g_vlabel_eps = 5e-3f; // tolerance on voltage label (V)
 
 static bool force_tot_override(float Vlabel)
@@ -151,18 +151,18 @@ static bool fit_peak_robust(TH1 *h, double &mu, double &sigma, double &emu, doub
     const double xMin = h->GetXaxis()->GetXmin();
     const double xMax = h->GetXaxis()->GetXmax();
 
-    const double mean0 = h->GetBinCenter(h->GetMaximumBin());
+    const double mean0 = h->GetBinCenter(h->GetMean());
     const double rms0 = std::max(1e-6, (double)h->GetRMS());
 
     double fmin = std::max(xMin, mean0 - 1.5 * rms0);
     double fmax = std::min(xMax, mean0 + 1.5 * rms0);
-    if (fmax - fmin < 0.07 * (xMax - xMin))
-    {
-        fmin = std::max(xMin, mean0 - 0.25 * (xMax - xMin));
-        fmax = std::min(xMax, mean0 + 0.25 * (xMax - xMin));
-    }
+    // if (fmax - fmin < 0.07 * (xMax - xMin))
+    // {
+    //     fmin = std::max(xMin, mean0 - 0.25 * (xMax - xMin));
+    //     fmax = std::min(xMax, mean0 + 0.25 * (xMax - xMin));
+    // }
 
-    TF1 rough("rough_fit", "gaus", fmin, fmax);
+    TF1 rough("rough_fit", "gaus", xMin, xMax);
     rough.SetParameters(h->GetMean(), mean0, rms0);
     TFitResultPtr r0 = h->Fit(&rough, "RQS");
     if (!r0.Get() || r0->Status() != 0)
@@ -174,57 +174,58 @@ static bool fit_peak_robust(TH1 *h, double &mu, double &sigma, double &emu, doub
         return false;
 
     // Refined gaussian in m±s
-    double gmin = std::max(xMin, m - s);
-    double gmax = std::min(xMax, m + s);
-    if (gmax - gmin < 0.03 * (xMax - xMin))
-    {
+    // double gmin = std::max(xMin, m - s);
+    // double gmax = std::min(xMax, m + s);
+    // if (gmax - gmin < 0.03 * (xMax - xMin))
+    // {
         mu = m;
         sigma = s;
         emu = rough.GetParError(1);
         esigma = rough.GetParError(2);
         return true;
-    }
+    // }
 
-    TF1 g2("second_fit", "gaus", gmin, gmax);
-    g2.SetParameters(rough.GetParameter(0), m, s);
-    TFitResultPtr r1 = h->Fit(&g2, "RQS");
-    if (r1.Get() && r1->Status() == 0)
-    {
-        m = g2.GetParameter(1);
-        s = std::abs(g2.GetParameter(2));
-    }
+    // TF1 g2("second_fit", "gaus", gmin, gmax);
+    // g2.SetParameters(rough.GetParameter(0), m, s);
+    // TFitResultPtr r1 = h->Fit(&g2, "RQS");
+    // if (r1.Get() && r1->Status() == 0)
+    // {
+    //     m = g2.GetParameter(1);
+    //     s = std::abs(g2.GetParameter(2));
+    // }
 
-    // Final: crystalball in m±s (usually helps tails)
-    double cmin = std::max(xMin, m - s);
-    double cmax = std::min(xMax, m + s);
-    if (cmax - cmin < 0.03 * (xMax - xMin))
-    {
-        mu = m;
-        sigma = s;
-        emu = g2.GetParError(1);
-        esigma = g2.GetParError(2);
-        return true;
-    }
+    // // Final: crystalball in m±s (usually helps tails)
+    // double cmin = std::max(xMin, m - s);
+    // double cmax = std::min(xMax, m + s);
+    // if (cmax - cmin < 0.03 * (xMax - xMin))
+    // {
+    //     mu = m;
+    //     sigma = s;
+    //     emu = g2.GetParError(1);
+    //     esigma = g2.GetParError(2);
+    //     return true;
+    // }
 
-    TF1 cb("final_fit", "crystalball", cmin, cmax);
-    cb.SetParameters(g2.GetParameter(0), m, s, 1.5, 2.0);
-    TFitResultPtr r2 = h->Fit(&cb, "RQS");
+    // TF1 cb("final_fit", "crystalball", cmin, cmax);
+    // // TF1 cb("final_fit", "crystalball", xMin, xMax);
+    // cb.SetParameters(g2.GetParameter(0), m, s, 1.5, 2.0);
+    // TFitResultPtr r2 = h->Fit(&cb, "RQS");
 
-    if (r2.Get() && r2->Status() == 0)
-    {
-        mu = cb.GetParameter(1);
-        sigma = std::abs(cb.GetParameter(2));
-        emu = cb.GetParError(1);
-        esigma = cb.GetParError(2);
-        return true;
-    }
+    // if (r2.Get() && r2->Status() == 0)
+    // {
+    //     mu = cb.GetParameter(1);
+    //     sigma = std::abs(cb.GetParameter(2));
+    //     emu = cb.GetParError(1);
+    //     esigma = cb.GetParError(2);
+    //     return true;
+    // }
 
-    // fallback to gaussian
-    mu = m;
-    sigma = s;
-    emu = g2.GetParError(1);
-    esigma = g2.GetParError(2);
-    return true;
+    // // fallback to gaussian
+    // mu = m;
+    // sigma = s;
+    // emu = g2.GetParError(1);
+    // esigma = g2.GetParError(2);
+    // return true;
 }
 
 // Ellipse cut around (cx,cy) with widths (sx,sy)
@@ -304,7 +305,7 @@ static float load_adc_per_refunit(const char *adc_calib_root, float ref_voltage)
     }
 
     // Try exact key first
-    std::string exact = std::string(Form("mean_adc_to_ref_calibration_%.2fV", ref_voltage));
+    std::string exact = std::string(Form("mean_adc_to_ref_calibration_%.3fV", ref_voltage));
     TParameter<float> *p = (TParameter<float> *)f->Get(exact.c_str());
 
     // Fallback: find any key starting with the prefix
@@ -584,53 +585,39 @@ static std::vector<RunPoint> default_led_runs()
     // same list as led_analysis.C (Run, voltage)
     return {
         // {23, 0.0f},
-        // {26, 1.20f},
+        // {26, 1.2f},
         // {30, 1.22f},
         // {33, 1.24f},
-        {36, 1.25f},
-        {39, 1.26f},
-        {42, 1.27f},
-        {45, 1.28f},
-        {48, 1.29f},
-        {51, 1.30f},
-        {54, 1.32f},
-        {57, 1.33f},
-        {60, 1.34f} //,
-        // {63, 1.36f},
-        // {66, 1.37f},
-        // {69, 1.38f},
-        // {72, 1.40f},
-        // {75, 1.42f},
-        // {78, 1.44f},
-        // {81, 1.46f},
-        // {84, 1.48f},
-        // {87, 1.50f},
-        // {90, 1.52f},
-        // {93, 1.54f},
-        // {96, 1.56f},
-        // {99, 1.58f},
-        // {102, 1.60f},
-        // {105, 1.62f},
-        // {108, 1.64f},
-        // {111, 1.66f},
-        // {114, 1.68f},
-        // {117, 1.70f},
-        // {120, 1.72f},
-        // {123, 1.74f},
-        // {126, 1.76f},
-        // {129, 1.78f},
-        // {132, 1.80f},
-        // {135, 1.82f},
-        // {138, 1.84f},
-        // {141, 1.86f},
-        // {144, 1.88f}
+        // {36, 1.25},
+        // {39, 1.26f},
+        // {42, 1.27f},
+        // {45, 1.28f},
+        // {48, 1.29f},
+        // {51, 1.3f},
+        // {54, 1.32f},
+        // {57, 1.33f},
+        // {60, 1.34f},
+        {170, 1.25f},
+        {171, 1.259f},
+        {172, 1.268f},
+        {173, 1.277f}, // fin ADC
+        // {174, 1.286f},
+        {175, 1.295f},
+        {176, 1.304f},
+        {177, 1.313f},
+        {178, 1.322f},
+        {179, 1.331f},
+        {180, 1.34f}//,
+        // {181, 1.349f},
+        // {182, 1.358f},
+        // {183, 1.367f}
     };
 }
 
 void energy_resolution_led_scan(const char *data_dir = "data",
                                 const char *mapping_csv = "eeemcal_desy_dec2025_mapping_v2.csv",
                                 const char *outdir = "outputs",
-                                const char *adc_calib_root = "outputs/adc_to_ref_calibration_1.27V.root",
+                                const char *adc_calib_root = "outputs/adc_to_ref_calibration_1.259V.root",
                                 const char *tot_calib_root = "outputs/tot_calibration_values.root",
                                 int central_crystal = 12)
 {
@@ -686,7 +673,7 @@ void energy_resolution_led_scan(const char *data_dir = "data",
     // Determine reference voltage and adc_per_refunit
     float refV = totP.ref_voltage_V;
     if (!(refV > 0))
-        refV = 1.27f;
+        refV = 1.259f; // default reference voltage used in adc_calibration.cxx
 
     float adc_per_refunit = totP.adc_per_refunit;
     if (!(adc_per_refunit > 0))
@@ -772,7 +759,7 @@ void energy_resolution_led_scan(const char *data_dir = "data",
         std::string infile = std::string(Form("%s/Run%03d.root", data_dir, run));
 
         // gain factors for this voltage
-        std::string gain_root = std::string(Form("%s/gain_match_%.2fV.root", outdir, Vlabel));
+        std::string gain_root = std::string(Form("%s/gain_match_%.3fV.root", outdir, Vlabel));
         TH1 *gain_factors = nullptr;
         TH1 *crystal_factor = nullptr;
         TFile *gain_handle = nullptr;
@@ -1234,7 +1221,7 @@ void energy_resolution_led_scan(const char *data_dir = "data",
 
         canvas->Clear();
         hc1->Draw();
-        text.DrawLatex(0.15, 0.86, Form("Run %03d  (%.2f V)", run, Vlabel));
+        text.DrawLatex(0.15, 0.86, Form("Run %03d  (%.3f V)", run, Vlabel));
         if (ok1_use)
             text.DrawLatex(0.15, 0.80, Form("Central: mean=%.3f  #sigma=%.3f  res=%.2f%%", mu1_use, si1_use, 100.0 * si1_use / mu1_use));
         if (used_totcalib_override)
@@ -1243,7 +1230,7 @@ void energy_resolution_led_scan(const char *data_dir = "data",
 
         canvas->Clear();
         hc9->Draw();
-        text.DrawLatex(0.15, 0.86, Form("Run %03d  (%.2f V)", run, Vlabel));
+        text.DrawLatex(0.15, 0.86, Form("Run %03d  (%.3f V)", run, Vlabel));
         if (ok9_use)
             text.DrawLatex(0.15, 0.80, Form("3x3: mean=%.3f  #sigma=%.3f  res=%.2f%%", mu9_use, si9_use, 100.0 * si9_use / mu9_use));
         if (used_totcalib_override)
@@ -1252,7 +1239,7 @@ void energy_resolution_led_scan(const char *data_dir = "data",
 
         canvas->Clear();
         htot->Draw();
-        text.DrawLatex(0.15, 0.86, Form("Run %03d  (%.2f V)", run, Vlabel));
+        text.DrawLatex(0.15, 0.86, Form("Run %03d  (%.3f V)", run, Vlabel));
         if (okt_use)
             text.DrawLatex(0.15, 0.80, Form("Total: mean=%.3f  #sigma=%.3f  res=%.2f%%", mut_use, sit_use, 100.0 * sit_use / mut_use));
         if (used_totcalib_override)
@@ -1268,7 +1255,7 @@ void energy_resolution_led_scan(const char *data_dir = "data",
             e->SetLineWidth(2);
             e->Draw("same");
         }
-        text.DrawLatex(0.15, 0.86, Form("Run %03d  (%.2f V)  COG cut: %s", run, Vlabel, g_do_cog_ellipse_cut ? "ellipse" : "OFF"));
+        text.DrawLatex(0.15, 0.86, Form("Run %03d  (%.3f V)  COG cut: %s", run, Vlabel, g_do_cog_ellipse_cut ? "ellipse" : "OFF"));
         canvas->SaveAs(pdf.c_str());
 
         // keep in vectors for output

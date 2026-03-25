@@ -331,13 +331,13 @@ void gain_match_one(const char *filename,
         for (int sipm = 0; sipm < SIPMS_PER_CRYSTAL; ++sipm)
         {
             h_adc[crystal_id][sipm] = new TH1F(
-                Form("h_adc_%.2fV_cr%d_sipm%d", voltage, crystal_id, sipm),
-                Form("ADC-only | %.2f V | crystal %d | sipm %d;Signal;Counts", voltage, crystal_id, sipm),
+                Form("h_adc_%.3fV_cr%d_sipm%d", voltage, crystal_id, sipm),
+                Form("ADC-only | %.3f V | crystal %d | sipm %d;Signal;Counts", voltage, crystal_id, sipm),
                 200, 0, 1024);
 
             h_tot[crystal_id][sipm] = new TH1F(
-                Form("h_tot_%.2fV_cr%d_sipm%d", voltage, crystal_id, sipm),
-                Form("ToT-used | %.2f V | crystal %d | sipm %d;Signal;Counts", voltage, crystal_id, sipm),
+                Form("h_tot_%.3fV_cr%d_sipm%d", voltage, crystal_id, sipm),
+                Form("ToT-used | %.3f V | crystal %d | sipm %d;Signal;Counts", voltage, crystal_id, sipm),
                 200, 0, 1024);
         }
     }
@@ -496,7 +496,7 @@ void gain_match_one(const char *filename,
     zero_if_present(21, 15);
 
     // ---- Output names (include run label from filename and voltage)
-    std::string base = std::string(Form("gain_match_%.2fV", voltage));
+    std::string base = std::string(Form("gain_match_%.3fV", voltage));
     std::string pdf_file = std::string(Form("%s/%s.pdf", outdir, base.c_str()));
     std::string root_file = std::string(Form("%s/%s.root", outdir, base.c_str()));
 
@@ -524,7 +524,7 @@ void gain_match_one(const char *filename,
             if (hist)
                 hist->Draw();
 
-            text.DrawLatex(0.15, 0.83, Form("%.2f V", voltage));
+            text.DrawLatex(0.15, 0.83, Form("%.3f V", voltage));
             text.DrawLatex(0.15, 0.78, Form("Crystal %d SiPM %d", crystal_id, sipm_i));
             text.DrawLatex(0.15, 0.73, Form("Peak: %.1f", peak[crystal_id][sipm_i]));
             text.DrawLatex(0.15, 0.68, Form("Ch gain: %.2f", gain_factor[crystal_id][sipm_i]));
@@ -642,48 +642,35 @@ void gain_scan(const char *data_dir = "data",
                const char *outdir = "outputs",
                bool use_hybrid_tot = true)
 {
+    // (run, voltage)
     std::vector<std::pair<int, float>> runs = {
-        {23, 0.0f},
-        {26, 1.2f},
-        {30, 1.22f},
-        {33, 1.24f},
-        {36, 1.25f},
-        {39, 1.26f},
-        {42, 1.27f},
-        {45, 1.28f},
-        {48, 1.29f},
-        {51, 1.30f},
-        {54, 1.32f},
-        {57, 1.33f},
-        {60, 1.34f}//,
-        // {63, 1.36f},
-        // {66, 1.37f},
-        // {69, 1.38f},
-        // {72, 1.40f},
-        // {75, 1.42f},
-        // {78, 1.44f},
-        // {81, 1.46f},
-        // {84, 1.48f},
-        // {87, 1.50f},
-        // {90, 1.52f},
-        // {93, 1.54f},
-        // {96, 1.56f},
-        // {99, 1.58f},
-        // {102, 1.60f},
-        // {105, 1.62f},
-        // {108, 1.64f},
-        // {111, 1.66f},
-        // {114, 1.68f},
-        // {117, 1.70f},
-        // {120, 1.72f},
-        // {123, 1.74f},
-        // {126, 1.76f},
-        // {129, 1.78f},
-        // {132, 1.80f},
-        // {135, 1.82f},
-        // {138, 1.84f},
-        // {141, 1.86f},
-        // {144, 1.88f}
+        // {23, 0.0f},
+        // {26, 1.2f},
+        // {30, 1.22f},
+        // {33, 1.24f},
+        // {36, 1.25},
+        // {39, 1.26f},
+        // {42, 1.27f},
+        // {45, 1.28f},
+        // {48, 1.29f},
+        // {51, 1.3f},
+        // {54, 1.32f},
+        // {57, 1.33f},
+        // {60, 1.34f},
+        {170, 1.25f},
+        {171, 1.259f},
+        {172, 1.268f},
+        {173, 1.277f},
+        {174, 1.286f},
+        {175, 1.295f},
+        {176, 1.304f},
+        {177, 1.313f},
+        {178, 1.322f},
+        {179, 1.331f},
+        {180, 1.34f}//,
+        // {181, 1.349f},
+        // {182, 1.358f},
+        // {183, 1.367f}
     };
 
     for (auto &rv : runs)

@@ -37,6 +37,8 @@
 #include <utility>
 #include <string>
 #include <iostream>
+#include <fstream>
+#include <tuple>
 #include <cctype>
 #include <cmath>
 #include <algorithm>
@@ -55,9 +57,12 @@
 #include <TStyle.h>
 #include <TTree.h>
 #include <TProfile.h>
+#include <TGraph.h>
+#include <TGraphErrors.h>
 #include <TParameter.h>
 #include <TError.h>
 #include <TSystem.h>
+#include <TSystemDirectory.h>
 #include <TLeaf.h>
 #include <TFitResult.h>
 #include <TFitResultPtr.h>
@@ -222,12 +227,141 @@ static void subtract_common_mode(uint32_t out_adc[SAMPLES_PER_CHANNEL],
     }
 }
 
+static bool extract_voltage_from_calib_filename(const std::string &name, double &voltage)
+{
+    const std::string prefix = "adc_to_ref_calibration_";
+    const std::string suffix = "V.root";
+
+    if (name.size() <= prefix.size() + suffix.size())
+        return false;
+    if (name.rfind(prefix, 0) != 0)
+        return false;
+    if (name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0)
+        return false;
+
+    const std::string value = name.substr(prefix.size(), name.size() - prefix.size() - suffix.size());
+    try
+    {
+        voltage = std::stod(value);
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+static void make_adc_calibration_summary(const char *outdir)
+{
+    if (!outdir || !outdir[0])
+        return;
+
+    void *dirp = gSystem->OpenDirectory(outdir);
+    if (!dirp)
+    {
+        std::cerr << "Warning: cannot open output directory for summary: " << outdir << "\n";
+        return;
+    }
+
+    std::vector<std::tuple<double, double, double, double>> rows;
+
+    const char *entry = nullptr;
+    while ((entry = gSystem->GetDirEntry(dirp)) != nullptr)
+    {
+        std::string name(entry);
+        double voltage = 0.0;
+        if (!extract_voltage_from_calib_filename(name, voltage))
+            continue;
+
+        std::string path = std::string(outdir) + "/" + name;
+        TFile *in = TFile::Open(path.c_str(), "READ");
+        if (!in || in->IsZombie())
+        {
+            if (in)
+            {
+                in->Close();
+                delete in;
+            }
+            continue;
+        }
+
+        auto *p_mean = dynamic_cast<TParameter<float> *>(in->Get(Form("mean_adc_to_ref_calibration_%.3fV", voltage)));
+        auto *p_res = dynamic_cast<TParameter<float> *>(in->Get(Form("central_energy_res_pct_%.3fV", voltage)));
+        auto *p_res_err = dynamic_cast<TParameter<float> *>(in->Get(Form("central_energy_res_pct_err_%.3fV", voltage)));
+
+        if (p_mean && p_res)
+        {
+            const double res_err = p_res_err ? (double)p_res_err->GetVal() : 0.0;
+            rows.emplace_back(voltage, (double)p_mean->GetVal(), (double)p_res->GetVal(), res_err);
+        }
+
+        in->Close();
+        delete in;
+    }
+    gSystem->FreeDirectory(dirp);
+
+    if (rows.empty())
+    {
+        std::cerr << "Warning: no adc_to_ref_calibration_*.root files found in " << outdir << "\n";
+        return;
+    }
+
+    std::sort(rows.begin(), rows.end(),
+              [](const auto &a, const auto &b)
+              { return std::get<0>(a) < std::get<0>(b); });
+
+    const std::string txt_out = std::string(outdir) + "/adc_to_ref_calibration_summary.txt";
+    std::ofstream ofs(txt_out.c_str());
+    ofs << "# voltage[V] mean_adc_to_ref_calibration central_energy_res_pct central_energy_res_pct_err\n";
+    for (const auto &row : rows)
+    {
+        ofs << Form("%.3f %.6f %.6f %.6f", std::get<0>(row), std::get<1>(row), std::get<2>(row), std::get<3>(row)) << "\n";
+    }
+    ofs.close();
+
+    const int n = (int)rows.size();
+    TGraphErrors *gr = new TGraphErrors(n);
+    gr->SetName("central_energy_res_pct_vs_voltage");
+    gr->SetTitle("Central Energy Resolution vs Voltage;Voltage (V);Central Energy Resolution (%)");
+
+    for (int i = 0; i < n; ++i)
+    {
+        gr->SetPoint(i, std::get<0>(rows[i]), std::get<2>(rows[i]));
+        gr->SetPointError(i, 0.0, std::get<3>(rows[i]));
+    }
+
+    TCanvas *c = new TCanvas("c_adc_calib_summary", "", 900, 700);
+    gr->SetMarkerStyle(20);
+    gr->SetMarkerSize(1.0);
+    gr->SetLineWidth(2);
+    c->SetGrid();
+    gr->Draw("AP");
+
+    const std::string png_out = std::string(outdir) + "/central_energy_res_pct_vs_voltage.png";
+    const std::string pdf_out = std::string(outdir) + "/central_energy_res_pct_vs_voltage.pdf";
+    c->SaveAs(png_out.c_str());
+    c->SaveAs(pdf_out.c_str());
+
+    const std::string root_out = std::string(outdir) + "/adc_to_ref_calibration_summary.root";
+    TFile *fout = TFile::Open(root_out.c_str(), "RECREATE");
+    gr->Write();
+    fout->Close();
+    delete fout;
+
+    delete c;
+    delete gr;
+
+    std::cout << "Saved calibration summary: " << txt_out << "\n";
+    std::cout << "Saved resolution-vs-voltage plots: " << png_out << " and " << pdf_out << "\n";
+    std::cout << "Saved summary ROOT graph: " << root_out << "\n";
+}
+
 // ---------------------- main function ----------------------
 
 void adc_calibration_one(const char *filename,
                          float voltage,
                          const char *mapping_csv = "eeemcal_desy_dec2025_mapping_v2.csv",
-                         const char *gain_root_file = "outputs/gain_match_1.27V.root",
+                         const char *gain_root_file = "outputs/gain_match_1.25V.root",
                          const char *outdir = "outputs",
                          Long64_t max_events = 1000000,
                          float energy_fraction_cut = 0.0f,
@@ -446,15 +580,15 @@ void adc_calibration_one(const char *filename,
 
     // ---------------- Histograms (global) ----------------
     TH1 *central_crystal_energy = new TH1F("central_crystal_energy",
-                                           Form("Central Crystal Energy (%.2f V);Energy (ADC);Events", voltage),
+                                           Form("Central Crystal Energy (%.3f V);Energy (ADC);Events", voltage),
                                            500, 0, 75000);
 
     TH1 *central_nine_energy = new TH1F("central_nine_energy",
-                                        Form("Central 3x3 Energy (%.2f V);Energy (ADC);Events", voltage),
+                                        Form("Central 3x3 Energy (%.3f V);Energy (ADC);Events", voltage),
                                         500, 0, 75000);
 
     TH1 *total_energy = new TH1F("total_energy",
-                                 Form("Total Energy (%.2f V);Energy (ADC);Events", voltage),
+                                 Form("Total Energy (%.3f V);Energy (ADC);Events", voltage),
                                  500, 0, 75000);
 
     TH2 *cog_distribution = new TH2F("cog_distribution",
@@ -840,12 +974,12 @@ void adc_calibration_one(const char *filename,
 
     std::cout << "Total ToT-tagged events: " << tot_events << " out of " << nentries << "\n";
 
-    // ---------------- calibration: ADC per reference unit (1.27 V) ----------------
+    // ---------------- calibration: ADC per reference unit (1.27 V or 1.25 V) ----------------
     // Same formula you used:
     //   signal_for_1gev = mean(crystal_energy) / mean(crystal_energy_share)
     // Here renamed:
     //   signal_for_ref = mean(crystal_energy) / mean(crystal_energy_share)
-    // where "ref" is defined by voltage 1.27 V.
+    // where "ref" is defined by voltage 1.27 V or 1.25 V.
     int crystal_mapping_for_plots[MAX_NUM_CRYSTALS] = {
         4, 9, 14, 19, 24,
         3, 8, 13, 18, 23,
@@ -884,17 +1018,33 @@ void adc_calibration_one(const char *filename,
     double e_mu = 0.0;
     double e_sigma = 0.0;
     double e_res = 0.0; // sigma/mu
+    double e_mu_err = 0.0;
+    double e_sigma_err = 0.0;
+    double e_res_err = 0.0;
     bool e_fit_ok = false;
 
     if (central_crystal_energy && central_crystal_energy->GetEntries() > 50 && central_crystal_energy->GetRMS() > 0)
     {
-        const double mean0 = central_crystal_energy->GetBinCenter(central_crystal_energy->GetMaximumBin());
-        const double rms0 = std::max(50.0, central_crystal_energy->GetRMS());
+        const double xMin = central_crystal_energy->GetXaxis()->GetXmin();
+        const double xMax = central_crystal_energy->GetXaxis()->GetXmax();
+
+        // const double mean0 = central_crystal_energy->GetBinCenter(central_crystal_energy->GetMean());
+        // const double rms0 = std::max(50.0, (double)central_crystal_energy->GetRMS());
+
+        // double fmin = std::max(xMin, mean0 - 1.5 * rms0);
+        // double fmax = std::min(xMax, mean0 + 1.5 * rms0);
+        // if (fmax - fmin < 0.03 * (xMax - xMin))
+        // {
+        //     fmin = std::max(xMin, mean0 - 0.5 * (xMax - xMin));
+        //     fmax = std::min(xMax, mean0 + 0.5 * (xMax - xMin));
+        // }
+        const double mean0 = central_crystal_energy->GetBinCenter(central_crystal_energy->GetMean()); // central_crystal_energy->GetMaximumBin()
+        const double rms0 = std::max(0.0, central_crystal_energy->GetRMS());
         const double fmin = std::max(0.0, mean0 - 1.5 * rms0);
         const double fmax = mean0 + 1.5 * rms0;
 
-        TF1 fE(Form("central_energy_gaus_run%03d_%.2fV", run, REF_VOLTAGE), "gaus", fmin, fmax);
-        fE.SetParameters(central_crystal_energy->GetMaximum(), mean0, rms0);
+        TF1 fE(Form("central_energy_gaus_run%03d_%.3fV", run, REF_VOLTAGE), "gaus", xMin, xMax);
+        fE.SetParameters(central_crystal_energy->GetMean(), mean0, rms0); // (central_crystal_energy->GetMaximum(), mean0, rms0);
 
         TFitResultPtr rr = central_crystal_energy->Fit(&fE, "RQS"); // stores fit on hist
 
@@ -902,7 +1052,15 @@ void adc_calibration_one(const char *filename,
         {
             e_mu = fE.GetParameter(1);
             e_sigma = std::abs(fE.GetParameter(2));
+            e_mu_err = fE.GetParError(1);
+            e_sigma_err = fE.GetParError(2);
             e_res = (e_mu != 0.0) ? (e_sigma / e_mu) : 0.0;
+            if (e_mu != 0.0 && e_sigma != 0.0)
+            {
+                const double rel_sigma = e_sigma_err / e_sigma;
+                const double rel_mu = e_mu_err / e_mu;
+                e_res_err = std::abs(e_res) * std::sqrt(rel_sigma * rel_sigma + rel_mu * rel_mu);
+            }
             e_fit_ok = true;
         }
     }
@@ -916,8 +1074,8 @@ void adc_calibration_one(const char *filename,
     // ---------------- save outputs ----------------
     int run_out = extract_run_number(filename);
 
-    std::string pdf = std::string(Form("%s/adc_calibration_Run%03d_%.2fV.pdf", outdir, run_out, voltage));
-    std::string root_out = std::string(Form("%s/adc_to_ref_calibration_%.2fV.root", outdir, REF_VOLTAGE));
+    std::string pdf = std::string(Form("%s/adc_calibration_Run%03d_%.3fV.pdf", outdir, run_out, voltage));
+    std::string root_out = std::string(Form("%s/adc_to_ref_calibration_%.3fV.root", outdir, REF_VOLTAGE));
 
     TCanvas *canvas = new TCanvas("adc_calibration_canvas", "", 900, 700);
     canvas->SetRightMargin(0.05);
@@ -925,7 +1083,7 @@ void adc_calibration_one(const char *filename,
     canvas->SaveAs((pdf + "[").c_str());
 
     central_crystal_energy->Draw("hist e");
-    if (TF1 *f = central_crystal_energy->GetFunction(Form("central_energy_gaus_run%03d_%.2fV", run_out, REF_VOLTAGE)))
+    if (TF1 *f = central_crystal_energy->GetFunction(Form("central_energy_gaus_run%03d_%.3fV", run_out, REF_VOLTAGE)))
         f->Draw("same");
     canvas->SaveAs(pdf.c_str());
 
@@ -1044,7 +1202,7 @@ void adc_calibration_one(const char *filename,
             t.SetNDC();
             t.SetTextSize(0.04);
             float x_coord = (i == 12 ? 0.15f : 0.40f);
-            t.DrawLatex(x_coord, 0.82, Form("ADC @ %.2fV: %.1f", REF_VOLTAGE, adc_per_ref));
+            t.DrawLatex(x_coord, 0.82, Form("ADC @ %.3fV: %.1f", REF_VOLTAGE, adc_per_ref));
         }
     }
     if (used_check > 0)
@@ -1146,9 +1304,9 @@ void adc_calibration_one(const char *filename,
     TLatex t;
     t.SetNDC();
     t.SetTextSize(0.04);
-    t.DrawLatex(0.12, 0.82, Form("Run: %03d   Voltage label: %.2f V", run_out, voltage));
-    t.DrawLatex(0.12, 0.76, Form("Reference unit: %.2f V (defined as 1 unit)", REF_VOLTAGE));
-    t.DrawLatex(0.12, 0.70, Form("Mean ADC per ref unit: %.2f", mean_calib));
+    t.DrawLatex(0.12, 0.82, Form("Run: %03d   Voltage label: %.3f V", run_out, voltage));
+    t.DrawLatex(0.12, 0.76, Form("Reference unit: %.3f V (defined as 1 unit)", REF_VOLTAGE));
+    t.DrawLatex(0.12, 0.70, Form("Mean ADC per ref unit: %.3f", mean_calib));
     // t.DrawLatex(0.12, 0.66, Form("LED wavelength: %.1f nm  (E_{#gamma}=%.3f eV = %.3g J)", LED_WAVELENGTH_NM, EPHOTON_EV, EPHOTON_J));
     t.DrawLatex(0.12, 0.64, Form("LED wavelength: %.1f nm  (E_{#gamma}=%.3f eV)", LED_WAVELENGTH_NM, EPHOTON_EV));
     t.DrawLatex(0.12, 0.58, Form("ToT mode used: %s", use_hybrid_tot ? "hybrid ADC/ToT" : "ADC-only"));
@@ -1163,20 +1321,28 @@ void adc_calibration_one(const char *filename,
 
     // ROOT output for the reference calibration
     TFile *out = TFile::Open(root_out.c_str(), "RECREATE");
-    TParameter<float> p(Form("mean_adc_to_ref_calibration_%.2fV", REF_VOLTAGE), mean_calib);
+    TParameter<float> p(Form("mean_adc_to_ref_calibration_%.3fV", REF_VOLTAGE), mean_calib);
     p.Write();
 
     // Resolution parameters for the reference voltage peak
-    TParameter<float> p_mu(Form("central_energy_mu_%.2fV", REF_VOLTAGE), (float)e_mu);
-    TParameter<float> p_sigma(Form("central_energy_sigma_%.2fV", REF_VOLTAGE), (float)e_sigma);
-    TParameter<float> p_res(Form("central_energy_res_%.2fV", REF_VOLTAGE), (float)e_res);
-    TParameter<float> p_res_pct(Form("central_energy_res_pct_%.2fV", REF_VOLTAGE), (float)(100.0 * e_res));
-    TParameter<int> p_fitok(Form("central_energy_fit_ok_%.2fV", REF_VOLTAGE), (int)e_fit_ok);
+    TParameter<float> p_mu(Form("central_energy_mu_%.3fV", REF_VOLTAGE), (float)e_mu);
+    TParameter<float> p_sigma(Form("central_energy_sigma_%.3fV", REF_VOLTAGE), (float)e_sigma);
+    TParameter<float> p_res(Form("central_energy_res_%.3fV", REF_VOLTAGE), (float)e_res);
+    TParameter<float> p_mu_err(Form("central_energy_mu_err_%.3fV", REF_VOLTAGE), (float)e_mu_err);
+    TParameter<float> p_sigma_err(Form("central_energy_sigma_err_%.3fV", REF_VOLTAGE), (float)e_sigma_err);
+    TParameter<float> p_res_err(Form("central_energy_res_err_%.3fV", REF_VOLTAGE), (float)e_res_err);
+    TParameter<float> p_res_pct(Form("central_energy_res_pct_%.3fV", REF_VOLTAGE), (float)(100.0 * e_res));
+    TParameter<float> p_res_pct_err(Form("central_energy_res_pct_err_%.3fV", REF_VOLTAGE), (float)(100.0 * e_res_err));
+    TParameter<int> p_fitok(Form("central_energy_fit_ok_%.3fV", REF_VOLTAGE), (int)e_fit_ok);
 
     p_mu.Write();
     p_sigma.Write();
     p_res.Write();
+    p_mu_err.Write();
+    p_sigma_err.Write();
+    p_res_err.Write();
     p_res_pct.Write();
+    p_res_pct_err.Write();
     p_fitok.Write();
 
     // Bookkeeping: LED wavelength and photon energy (useful if to obtain an optical-energy equivalent)
@@ -1252,48 +1418,35 @@ void adc_calib_scan(const char *data_dir = "data",
                     //    const char *outdir = "outputs",
                     bool use_hybrid_tot = true)
 {
+    // (run, voltage)
     std::vector<std::pair<int, float>> runs = {
         // {23, 0.0f},
         // {26, 1.2f},
         // {30, 1.22f},
         // {33, 1.24f},
-        // {36, 1.25f},
+        // {36, 1.25},
         // {39, 1.26f},
-        {42, 1.27f} //,
+        // {42, 1.27f},
         // {45, 1.28f},
         // {48, 1.29f},
-        // {51, 1.30f},
+        // {51, 1.3f},
         // {54, 1.32f},
         // {57, 1.33f},
         // {60, 1.34f},
-        // {63, 1.36f},
-        // {66, 1.37f},
-        // {69, 1.38f},
-        // {72, 1.40f},
-        // {75, 1.42f},
-        // {78, 1.44f},
-        // {81, 1.46f},
-        // {84, 1.48f},
-        // {87, 1.50f},
-        // {90, 1.52f},
-        // {93, 1.54f},
-        // {96, 1.56f},
-        // {99, 1.58f},
-        // {102, 1.60f},
-        // {105, 1.62f},
-        // {108, 1.64f},
-        // {111, 1.66f},
-        // {114, 1.68f},
-        // {117, 1.70f},
-        // {120, 1.72f},
-        // {123, 1.74f},
-        // {126, 1.76f},
-        // {129, 1.78f},
-        // {132, 1.80f},
-        // {135, 1.82f},
-        // {138, 1.84f},
-        // {141, 1.86f},
-        // {144, 1.88f}
+        {170, 1.25f},
+        {171, 1.259f},
+        {172, 1.268f},
+        {173, 1.277f}//,
+        // {174, 1.286f},
+        // {175, 1.295f},
+        // {176, 1.304f},
+        // {177, 1.313f},
+        // {178, 1.322f},
+        // {179, 1.331f},
+        // {180, 1.34f}//,
+        // {181, 1.349f},
+        // {182, 1.358f},
+        // {183, 1.367f}
     };
 
     for (auto &rv : runs)
@@ -1303,8 +1456,11 @@ void adc_calib_scan(const char *data_dir = "data",
 
         std::string fn = std::string(Form("%s/Run%03d.root", data_dir, run));
         std::cout << "\n--- adc calibration using common mode extraction: " << fn << " @ " << v << " V ---\n";
-        adc_calibration_one(fn.c_str(), v, mapping_csv, "outputs/gain_match_1.27V.root", "outputs_cm_adc", 1000000, 0.0, use_hybrid_tot, true, 470.0);
+        adc_calibration_one(fn.c_str(), v, mapping_csv, Form("outputs/gain_match_%.3fV.root", v), "outputs_cm_adc", 1000000, 0.0, use_hybrid_tot, true, 470.0);
         std::cout << "\n--- adc calibration using common mode extraction: " << fn << " @ " << v << " V ---\n";
-        adc_calibration_one(fn.c_str(), v, mapping_csv, "outputs/gain_match_1.27V.root", "outputs", 1000000, 0.0, use_hybrid_tot, false, 470.0);
+        adc_calibration_one(fn.c_str(), v, mapping_csv, Form("outputs/gain_match_%.3fV.root", v), "outputs", 1000000, 0.0, use_hybrid_tot, false, 470.0);
     }
+
+    make_adc_calibration_summary("outputs_cm_adc");
+    make_adc_calibration_summary("outputs");
 }
