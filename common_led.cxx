@@ -11,6 +11,10 @@
 #include <map>
 #include <sstream>
 #include <vector>
+#include <unordered_map>
+#include <utility>
+#include <string>
+#include <cctype>
 
 #include <TH1.h>
 #include <TH1F.h>
@@ -37,6 +41,117 @@
 int g_signal_method = 3; // 2, 3, 4, 5, 7 (7 = waveform crystal ball fit)
 int g_sipms_to_use = 16; // Number of SiPMs to use per crystal (= 16)
 uint32_t g_tot_min = 50; // Minimum ToT value to consider valid
+
+int extract_run_number(const char *filename)
+{
+    if (!filename)
+        return -1;
+
+    std::string s(filename);
+    int run = -1;
+    size_t pos = s.find("Run");
+    if (pos != std::string::npos)
+    {
+        pos += 3;
+        std::string digits;
+        while (pos < s.size() && std::isdigit((unsigned char)s[pos]))
+        {
+            digits += s[pos];
+            pos++;
+        }
+        if (!digits.empty())
+            run = std::stoi(digits);
+    }
+    return run;
+}
+
+void print_progress_25(int progress)
+{
+    std::cout << " [";
+    for (int i = 0; i < LED_MAX_NUM_CRYSTALS; ++i)
+        std::cout << (i < progress ? "*" : " ");
+    std::cout << "]\r" << std::flush;
+    if (progress >= LED_MAX_NUM_CRYSTALS)
+        std::cout << "\n";
+}
+
+void build_xy_for_crystal(int crystal_id, float &x, float &y)
+{
+    const int crystal_mapping[LED_MAX_NUM_CRYSTALS] = {
+        4, 9, 14, 19, 24,
+        3, 8, 13, 18, 23,
+        2, 7, 12, 17, 22,
+        1, 6, 11, 16, 21,
+        0, 5, 10, 15, 20};
+
+    int found = -1;
+    for (int i = 0; i < LED_MAX_NUM_CRYSTALS; ++i)
+    {
+        if (crystal_mapping[i] == crystal_id)
+        {
+            found = i;
+            break;
+        }
+    }
+
+    if (found < 0)
+    {
+        x = -999.0f;
+        y = -999.0f;
+        return;
+    }
+
+    const int row = found / 5;
+    const int col = found % 5;
+    x = (float)col;
+    y = (float)row;
+}
+
+bool point_in_ellipse(float x, float y, float cx, float cy, float sx, float sy)
+{
+    if (sx <= 0 || sy <= 0)
+        return true;
+    const float dx = (x - cx) / sx;
+    const float dy = (y - cy) / sy;
+    return (dx * dx + dy * dy) <= 1.0f;
+}
+
+void subtract_common_mode(uint32_t out_adc[LED_SAMPLES_PER_CHANNEL],
+                          uint32_t *in_adc,
+                          float cm)
+{
+    for (int i = 0; i < LED_SAMPLES_PER_CHANNEL; ++i)
+    {
+        float v = (float)in_adc[i] - cm;
+        if (v < 0.0f)
+            v = 0.0f;
+        out_adc[i] = (uint32_t)(v + 0.5f);
+    }
+}
+
+std::unordered_map<int, std::pair<int, int>> build_reverse_channel_map(
+    const std::map<int, std::vector<int>> &mapping,
+    int sipms_to_use)
+{
+    std::unordered_map<int, std::pair<int, int>> reverse;
+    reverse.reserve(mapping.size() * (size_t)sipms_to_use);
+
+    for (const auto &kv : mapping)
+    {
+        const int crystal_id = kv.first;
+        const auto chans = get_crystal_channels(mapping, crystal_id, sipms_to_use);
+
+        for (int sipm = 0; sipm < sipms_to_use; ++sipm)
+        {
+            const int ch = chans[sipm];
+            if (ch < 0)
+                continue;
+            reverse[ch] = {crystal_id, sipm};
+        }
+    }
+
+    return reverse;
+}
 
 std::map<int, std::vector<int>> read_mapping_csv(const std::string &filename,
                                                  int expected_sipms_per_crystal)
@@ -174,7 +289,7 @@ float calculate_signal_v5(uint32_t *adc_values, float gain)
     float max_sample = 0.0f;
     int idx = 0;
 
-    for (int i = 3; i < 20; ++i)
+    for (int i = 3; i < LED_SAMPLES_PER_CHANNEL; ++i)
     {
         float sample = adc_values[i] - ped;
         if (sample > max_sample)
@@ -292,15 +407,15 @@ float calculate_signal_v7(uint32_t *adc_values, float gain)
 {
     // Fit samples in a histogram (bins correspond to time sample index)
 
-    TH1F temp("temp_waveform", "temp_waveform", 20, 0, 20);
-    for (int i = 3; i < 20; ++i)
+    TH1F temp("temp_waveform", "temp_waveform", LED_SAMPLES_PER_CHANNEL, 0, LED_SAMPLES_PER_CHANNEL);
+    for (int i = 3; i < LED_SAMPLES_PER_CHANNEL; ++i)
     {
         float sample = adc_values[i];
         temp.SetBinContent(i, sample); // ROOT histograms start at bin 1
     }
     float ped = pedestal_2samples(adc_values);
 
-    TF1 fit("cb_wave", crystal_ball_waveform, 4, 20, 6);
+    TF1 fit("cb_wave", crystal_ball_waveform, 4, LED_SAMPLES_PER_CHANNEL, 6);
     fit.SetParameters(1.1, 0.4, 6.0, 0.45, 50.0, ped);
     fit.SetParLimits(0, 1.0, 1.2);   // alpha
     fit.SetParLimits(1, 0.2, 0.8);   // n
@@ -351,7 +466,7 @@ float calculate_signal_adc(uint32_t *adc_values, float gain)
 
 bool has_tot(uint32_t *tot_values)
 {
-    for (int i = 0; i < 20; ++i)
+    for (int i = 0; i < LED_SAMPLES_PER_CHANNEL; ++i)
     {
         if (tot_values[i] > g_tot_min)
         {
@@ -363,7 +478,7 @@ bool has_tot(uint32_t *tot_values)
 
 uint32_t get_tot_first(uint32_t *tot_values)
 {
-    for (int i = 0; i < 20; ++i)
+    for (int i = 0; i < LED_SAMPLES_PER_CHANNEL; ++i)
     {
         if (tot_values[i] > g_tot_min)
         {
@@ -376,7 +491,7 @@ uint32_t get_tot_first(uint32_t *tot_values)
 uint32_t get_tot_max(uint32_t *tot_values)
 {
     uint32_t max_tot = 0;
-    for (int i = 0; i < 20; ++i)
+    for (int i = 0; i < LED_SAMPLES_PER_CHANNEL; ++i)
     {
         if (tot_values[i] > g_tot_min && tot_values[i] > max_tot)
         {

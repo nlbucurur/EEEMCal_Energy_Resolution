@@ -37,6 +37,7 @@
 #include <cctype>
 #include <cmath>
 #include <algorithm>
+#include <set>
 
 #include <sys/stat.h>
 
@@ -60,12 +61,17 @@
 #include <TROOT.h>
 #include <TGraphErrors.h>
 #include <TProfile.h>
+//========================================================//
+//==============       Change this        ================//
+//========================================================//
 // ADC calibration reference voltage used by adc_calibration.cxx
 static float g_adc_ref_voltage_V = 1.259f;
+static std::set<int> g_selected_central_sipms = {15}; // choose 0..15
+static bool g_scale_subset_to_16 = false;
+//========================================================//
+//==============       Change this        ================//
+//========================================================//
 
-static constexpr int SAMPLES_PER_CHANNEL = 20;
-static constexpr int SIPMS_PER_CRYSTAL = 16;
-static constexpr int MAX_NUM_CRYSTALS = 25;
 
 // ----- knobs (keep same defaults as Tristan's original) -----
 static float g_energy_fraction_cut = 0.30f; // used in COG selection
@@ -81,13 +87,18 @@ static inline bool is_skipped_crystal(int cr)
     return std::find(g_skip_crystals.begin(), g_skip_crystals.end(), cr) != g_skip_crystals.end();
 }
 
+static inline bool use_selected_central_sipm(int sipm)
+{
+    return g_selected_central_sipms.empty() ||
+           g_selected_central_sipms.count(sipm) > 0;
+}
+
 // COG ellipse cut (adjust if needed)
 static bool g_do_cog_ellipse_cut = true;
 static float g_cog_cx = 2.0f;
 static float g_cog_cy = 2.0f;
 static float g_cog_sx = 0.80f;
 static float g_cog_sy = 0.80f;
-
 
 // -----------------------------------------------------------------------------
 // Helpers
@@ -104,62 +115,9 @@ static void mkdir_p(const char *dir)
     }
 }
 
-static void print_progress_25(int progress)
-{
-    std::cout << " [";
-    for (int i = 0; i < MAX_NUM_CRYSTALS; i++)
-        std::cout << (i < progress ? "*" : " ");
-    std::cout << "]\r" << std::flush;
-    if (progress >= MAX_NUM_CRYSTALS)
-        std::cout << "\n";
-}
-
-// 5x5 geometry mapping used in your other macros.
-static void build_xy_for_crystal(int crystal_id, float &x, float &y)
-{
-    // index -> crystal_id (row-major, top-left to bottom-right)
-    int crystal_mapping[MAX_NUM_CRYSTALS] = {
-        4, 9, 14, 19, 24,
-        3, 8, 13, 18, 23,
-        2, 7, 12, 17, 22,
-        1, 6, 11, 16, 21,
-        0, 5, 10, 15, 20};
-
-    int found = -1;
-    for (int i = 0; i < MAX_NUM_CRYSTALS; ++i)
-    {
-        if (crystal_mapping[i] == crystal_id)
-        {
-            found = i;
-            break;
-        }
-    }
-
-    if (found < 0)
-    {
-        x = -999;
-        y = -999;
-        return;
-    }
-
-    int row = found / 5; // 0..4
-    int col = found % 5; // 0..4
-    x = (float)col;
-    y = (float)row;
-}
-
-static bool point_in_ellipse(float x, float y, float cx, float cy, float sx, float sy)
-{
-    if (sx <= 0 || sy <= 0)
-        return true;
-    const float dx = (x - cx) / sx;
-    const float dy = (y - cy) / sy;
-    return (dx * dx + dy * dy) <= 1.0f;
-}
-
 // Compute and optionally cut on COG, and optionally cut on central9 fraction.
 static bool calculate_cog(TH2 *distribution,
-                          const std::array<float, MAX_NUM_CRYSTALS> &signals)
+                          const std::array<float, LED_MAX_NUM_CRYSTALS> &signals)
 {
     // total
     double sumE = 0.0;
@@ -170,7 +128,7 @@ static bool calculate_cog(TH2 *distribution,
     const int central9[9] = {6, 7, 8, 11, 12, 13, 16, 17, 18};
     double sumE9 = 0.0;
 
-    for (int cr = 0; cr < MAX_NUM_CRYSTALS; ++cr)
+    for (int cr = 0; cr < LED_MAX_NUM_CRYSTALS; ++cr)
     {
         if (is_skipped_crystal(cr))
             continue;
@@ -193,7 +151,7 @@ static bool calculate_cog(TH2 *distribution,
         const int cr = central9[i];
         if (is_skipped_crystal(cr))
             continue;
-        if (cr < 0 || cr >= MAX_NUM_CRYSTALS)
+        if (cr < 0 || cr >= LED_MAX_NUM_CRYSTALS)
             continue;
         const float E = signals[cr];
         if (E > 0)
@@ -297,14 +255,14 @@ static void load_gain_factors(const char *gain_root,
     // Fallback to unity
     if (!gain_factors)
     {
-        gain_factors = new TH1F("gain_factors_unity", "Gain Factors;crystal*16+sipm;Gain", MAX_NUM_CRYSTALS * SIPMS_PER_CRYSTAL, 0, MAX_NUM_CRYSTALS * SIPMS_PER_CRYSTAL);
+        gain_factors = new TH1F("gain_factors_unity", "Gain Factors;crystal*16+sipm;Gain", LED_MAX_NUM_CRYSTALS * LED_SIPMS_PER_CRYSTAL, 0, LED_MAX_NUM_CRYSTALS * LED_SIPMS_PER_CRYSTAL);
         for (int i = 1; i <= gain_factors->GetNbinsX(); ++i)
             gain_factors->SetBinContent(i, 1.0);
     }
 
     if (!crystal_factor)
     {
-        crystal_factor = new TH1F("crystal_factor_unity", "Crystal Factors;crystal;Gain", MAX_NUM_CRYSTALS, 0, MAX_NUM_CRYSTALS);
+        crystal_factor = new TH1F("crystal_factor_unity", "Crystal Factors;crystal;Gain", LED_MAX_NUM_CRYSTALS, 0, LED_MAX_NUM_CRYSTALS);
         for (int i = 1; i <= crystal_factor->GetNbinsX(); ++i)
             crystal_factor->SetBinContent(i, 1.0);
     }
@@ -357,7 +315,7 @@ static bool tot_calibration_one(const char *filename,
                                 TH1F *h_tot,
                                 TH2F *h_tot_vs_label_minus_missing,
                                 TH2F *h_cog,
-                                std::array<TH1F *, SIPMS_PER_CRYSTAL> &h_per_sipm_tot,
+                                std::array<TH1F *, LED_SIPMS_PER_CRYSTAL> &h_per_sipm_tot,
                                 TH1 *widths_hist,
                                 bool use_widths)
 {
@@ -405,17 +363,17 @@ static bool tot_calibration_one(const char *filename,
     tree->GetEntry(0);
     const int n_adc = leaf_adc->GetLen();
     const int n_tot = leaf_tot->GetLen();
-    if (n_adc != n_tot || (n_adc % SAMPLES_PER_CHANNEL) != 0)
+    if (n_adc != n_tot || (n_adc % LED_SAMPLES_PER_CHANNEL) != 0)
     {
         std::cerr << "Unexpected adc/tot shape in " << filename
                   << " n_adc=" << n_adc << " n_tot=" << n_tot
-                  << " samples=" << SAMPLES_PER_CHANNEL << "\n";
+                  << " samples=" << LED_SAMPLES_PER_CHANNEL << "\n";
         f->Close();
         delete f;
         return false;
     }
 
-    const int num_channels = n_adc / SAMPLES_PER_CHANNEL;
+    const int num_channels = n_adc / LED_SAMPLES_PER_CHANNEL;
     std::vector<uint32_t> adc_buf((size_t)n_adc);
     std::vector<uint32_t> tot_buf((size_t)n_tot);
 
@@ -447,12 +405,12 @@ static bool tot_calibration_one(const char *filename,
         tree->GetEntry(entry);
 
         // ----- Non-central ADC signals (reject if any non-central ToT) -----
-        std::array<float, MAX_NUM_CRYSTALS> signals;
+        std::array<float, LED_MAX_NUM_CRYSTALS> signals;
         signals.fill(0.0f);
 
         bool has_noncentral_tot = false;
 
-        for (int cr = 0; cr < MAX_NUM_CRYSTALS; ++cr)
+        for (int cr = 0; cr < LED_MAX_NUM_CRYSTALS; ++cr)
         {
             if (cr == central_crystal)
                 continue;
@@ -466,7 +424,7 @@ static bool tot_calibration_one(const char *filename,
             const std::vector<int> &chans = it->second;
             float crystal_signal = 0.0f;
 
-            for (int sipm = 0; sipm < SIPMS_PER_CRYSTAL; ++sipm)
+            for (int sipm = 0; sipm < LED_SIPMS_PER_CRYSTAL; ++sipm)
             {
                 if (sipm >= (int)chans.size())
                     break;
@@ -474,13 +432,13 @@ static bool tot_calibration_one(const char *filename,
                 if (ch < 0 || ch >= num_channels)
                     continue;
 
-                uint32_t *adc_vals = &adc_buf[(size_t)ch * SAMPLES_PER_CHANNEL];
-                uint32_t *tot_vals = &tot_buf[(size_t)ch * SAMPLES_PER_CHANNEL];
+                uint32_t *adc_vals = &adc_buf[(size_t)ch * LED_SAMPLES_PER_CHANNEL];
+                uint32_t *tot_vals = &tot_buf[(size_t)ch * LED_SAMPLES_PER_CHANNEL];
 
                 if (!has_noncentral_tot && has_tot(tot_vals))
                     has_noncentral_tot = true;
 
-                const int idx = cr * SIPMS_PER_CRYSTAL + sipm;
+                const int idx = cr * LED_SIPMS_PER_CRYSTAL + sipm;
                 const float gch = (gain_factors ? (float)gain_factors->GetBinContent(idx + 1) : 1.0f);
 
                 const float sig = calculate_signal_adc(adc_vals, gch);
@@ -497,7 +455,7 @@ static bool tot_calibration_one(const char *filename,
             continue;
         }
 
-        // ----- Central crystal: require ToT on all SiPMs -----
+        // ----- Central crystal: require ToT on all selected SiPMs -----
         auto itc = mapping.find(central_crystal);
         if (itc == mapping.end())
             continue;
@@ -506,16 +464,22 @@ static bool tot_calibration_one(const char *filename,
 
         float tot_sum = 0.0f;
         int used = 0;
+        const int n_expected = (int)g_selected_central_sipms.size();
 
-        for (int sipm = 0; sipm < SIPMS_PER_CRYSTAL; ++sipm)
+        for (int sipm = 0; sipm < LED_SIPMS_PER_CRYSTAL; ++sipm)
         {
+            if (!use_selected_central_sipm(sipm))
+                continue;
+
             if (sipm >= (int)center_chans.size())
                 break;
+
             const int ch = center_chans[sipm];
+
             if (ch < 0 || ch >= num_channels)
                 continue;
 
-            uint32_t *tot_vals = &tot_buf[(size_t)ch * SAMPLES_PER_CHANNEL];
+            uint32_t *tot_vals = &tot_buf[(size_t)ch * LED_SAMPLES_PER_CHANNEL];
 
             if (!has_tot(tot_vals))
             {
@@ -545,24 +509,27 @@ static bool tot_calibration_one(const char *filename,
                 h_per_sipm_tot[sipm]->Fill((float)raw_tot);
 
             // Sum with channel gain factor (match the old: center_signal += signal * gain)
-            const int idx = central_crystal * SIPMS_PER_CRYSTAL + sipm;
+            const int idx = central_crystal * LED_SIPMS_PER_CRYSTAL + sipm;
             const float gch = (gain_factors ? (float)gain_factors->GetBinContent(idx + 1) : 1.0f);
             tot_sum += (float)raw_tot * gch;
             used++;
         }
 
-        if (used != SIPMS_PER_CRYSTAL)
+        if (used != n_expected)
             continue;
 
+        // if (used != LED_SIPMS_PER_CRYSTAL)
+        //     continue;
+
         // normalize to 16 channels
-        if (used > 0)
-            tot_sum *= ((float)SIPMS_PER_CRYSTAL / (float)used);
+        if (g_scale_subset_to_16 && used > 0)
+            tot_sum *= ((float)LED_SIPMS_PER_CRYSTAL / (float)used);
 
         if (tot_sum < g_tot_min_cut)
             tot_sum = 0.0f;
 
         // COG cut (use ToT proxy for central crystal so ToT-only / ADC-empty runs still work)
-        std::array<float, MAX_NUM_CRYSTALS> cog_w = signals; // noncentral ADC (maybe 0)
+        std::array<float, LED_MAX_NUM_CRYSTALS> cog_w = signals; // noncentral ADC (maybe 0)
         cog_w[central_crystal] = tot_sum;                    // central ToT proxy
         // COG cut (also fills h_cog)
         if (!calculate_cog(h_cog, cog_w))
@@ -574,7 +541,7 @@ static bool tot_calibration_one(const char *filename,
 
         // Sum non-central energy (ADC-based) and convert to voltage-equivalent using adc_per_refunit
         float noncentral_adc = 0.0f;
-        for (int cr = 0; cr < MAX_NUM_CRYSTALS; ++cr)
+        for (int cr = 0; cr < LED_MAX_NUM_CRYSTALS; ++cr)
         {
             if (cr == central_crystal)
                 continue;
@@ -659,14 +626,14 @@ void tot_calib_scan(const char *data_dir = "data",
         {177, 1.313f},
         {178, 1.322f},
         {179, 1.331f},
-        {180, 1.34f}//,
+        {180, 1.34f} //,
         // {181, 1.349f}//,
         // {182, 1.358f},
         // {183, 1.367f}
     };
 
     // ------------------ Mapping ------------------
-    auto mapping = read_mapping_csv(mapping_csv, SIPMS_PER_CRYSTAL);
+    auto mapping = read_mapping_csv(mapping_csv, LED_SIPMS_PER_CRYSTAL);
     if (mapping.empty())
     {
         std::cerr << "Error: mapping is empty. Check mapping_csv='" << mapping_csv << "'\n";
@@ -718,7 +685,7 @@ void tot_calib_scan(const char *data_dir = "data",
         TH1F *tot;
         TH2F *tot2d;
         TH2F *cog;
-        std::array<TH1F *, SIPMS_PER_CRYSTAL> per_sipm;
+        std::array<TH1F *, LED_SIPMS_PER_CRYSTAL> per_sipm;
 
         // --- add these ---
         double tot_mu = 0.0;
@@ -758,7 +725,7 @@ void tot_calib_scan(const char *data_dir = "data",
                          Form("Run %03d COG;X (crystals);Y (crystals)", runnum),
                          100, -0.5, 4.5, 100, -0.5, 4.5);
 
-        for (int sipm = 0; sipm < SIPMS_PER_CRYSTAL; ++sipm)
+        for (int sipm = 0; sipm < LED_SIPMS_PER_CRYSTAL; ++sipm)
         {
             o.per_sipm[sipm] = new TH1F(Form("run%03d_sipm%02d_rawtot", runnum, sipm),
                                         Form("Run %03d SiPM %02d raw ToT;raw ToT;Events", runnum, sipm),
@@ -896,8 +863,8 @@ void tot_calib_scan(const char *data_dir = "data",
     canvas->SaveAs((pdf + "[").c_str());
 
     // store peak mean/sigma per run to optionally write widths file
-    std::vector<std::vector<double>> peak_mean(outs.size(), std::vector<double>(SIPMS_PER_CRYSTAL, 0.0));
-    std::vector<std::vector<double>> peak_sigma(outs.size(), std::vector<double>(SIPMS_PER_CRYSTAL, 0.0));
+    std::vector<std::vector<double>> peak_mean(outs.size(), std::vector<double>(LED_SIPMS_PER_CRYSTAL, 0.0));
+    std::vector<std::vector<double>> peak_sigma(outs.size(), std::vector<double>(LED_SIPMS_PER_CRYSTAL, 0.0));
 
     for (size_t ir = 0; ir < outs.size(); ++ir)
     {
@@ -930,7 +897,7 @@ void tot_calib_scan(const char *data_dir = "data",
         // per-sipm fits
         auto pad = canvas->cd(5);
         pad->Divide(4, 4, 0.002, 0.002);
-        for (int sipm = 0; sipm < SIPMS_PER_CRYSTAL; ++sipm)
+        for (int sipm = 0; sipm < LED_SIPMS_PER_CRYSTAL; ++sipm)
         {
             pad->cd(sipm + 1);
             TH1F *h = o.per_sipm[sipm];
@@ -1006,7 +973,7 @@ void tot_calib_scan(const char *data_dir = "data",
 
     // global page + fits
     canvas->Clear();
-    //grid to this page
+    // grid to this page
     gPad->SetGridx();
     gPad->SetGridy();
     total_dist->Draw("colz");
@@ -1017,7 +984,7 @@ void tot_calib_scan(const char *data_dir = "data",
     canvas->Clear();
     total_invt->Draw("colz");
 
-    // float scale_factor = 16.0f / (float)SIPMS_PER_CRYSTAL;
+    // float scale_factor = 16.0f / (float)LED_SIPMS_PER_CRYSTAL;
 
     // TF1 *fit_hi = new TF1("fit_hi", "pol1", 35000.0f / scale_factor, 50000.0f / scale_factor);
     // total_invt->Fit(fit_hi, "RQ");
@@ -1035,8 +1002,7 @@ void tot_calib_scan(const char *data_dir = "data",
     // fit_mid->Draw("same");
     // fit_all->Draw("same");
 
-
-    //grid this pad
+    // grid this pad
     gPad->SetGridx();
     gPad->SetGridy();
 
@@ -1109,7 +1075,7 @@ void tot_calib_scan(const char *data_dir = "data",
         o.tot->Write();
         o.tot2d->Write();
         o.cog->Write();
-        for (int sipm = 0; sipm < SIPMS_PER_CRYSTAL; ++sipm)
+        for (int sipm = 0; sipm < LED_SIPMS_PER_CRYSTAL; ++sipm)
             if (o.per_sipm[sipm])
                 o.per_sipm[sipm]->Write();
     }
@@ -1132,8 +1098,8 @@ void tot_calib_scan(const char *data_dir = "data",
             const int runnum = outs[ir].run;
             TH1F *hw = new TH1F(Form("run%d_tot_widths", runnum),
                                 Form("Run %d ToT widths;SiPM;raw ToT", runnum),
-                                SIPMS_PER_CRYSTAL, 0, SIPMS_PER_CRYSTAL);
-            for (int sipm = 0; sipm < SIPMS_PER_CRYSTAL; ++sipm)
+                                LED_SIPMS_PER_CRYSTAL, 0, LED_SIPMS_PER_CRYSTAL);
+            for (int sipm = 0; sipm < LED_SIPMS_PER_CRYSTAL; ++sipm)
             {
                 hw->SetBinContent(sipm + 1, (float)peak_mean[ir][sipm]);
                 hw->SetBinError(sipm + 1, (float)peak_sigma[ir][sipm]);

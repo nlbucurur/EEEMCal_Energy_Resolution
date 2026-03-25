@@ -37,7 +37,7 @@ void draw_waveform_reversed(int run_number,
                    const char *out_dir = "outputs",
                    int sipms_to_use = g_sipms_to_use)
 {
-    const int samples_per_channel = 20;
+    const int samples_per_channel = LED_SAMPLES_PER_CHANNEL;
 
     // --- Read mapping
     auto mapping = read_mapping_csv(mapping_csv, sipms_to_use);
@@ -111,31 +111,9 @@ void draw_waveform_reversed(int run_number,
     // reverse[ch] = {crystal_id, sipm}
     // ============================================================
 
-    std::unordered_map<int, std::pair<int, int>> reverse;
-    reverse.reserve(mapping.size() * (size_t)sipms_to_use);
+    auto reverse = build_reverse_channel_map(mapping, sipms_to_use);
 
-    for (const auto &kv : mapping)
-    {
-        const int crystal_id = kv.first;
-        const auto chans = get_crystal_channels(mapping, crystal_id, sipms_to_use);
-
-        for (int sipm = 0; sipm < sipms_to_use; ++sipm)
-        {
-            const int ch = chans[sipm];
-            if (ch < 0) continue;
-
-            auto it = reverse.find(ch);
-            if (it != reverse.end())
-            {
-                std::cerr << "Duplicate channel in mapping: ch=" << ch
-                          << " previously (cr=" << it->second.first << ", sipm=" << it->second.second << ")"
-                          << " now (cr=" << crystal_id << ", sipm=" << sipm << ")\n";
-            }
-            reverse[ch] = {crystal_id, sipm};
-        }
-    }
-
-    auto active_channels = get_active_channels_from_mapping(mapping, sipms_to_use);
+    auto active_channels = get_active_channels_from_mapping(mapping, sipms_to_use, LED_MAX_NUM_CRYSTALS, nch_from_file);
     if (active_channels.empty())
     {
         std::cerr << "Error: active_channels is empty (check mapping / sipms_to_use).\n";

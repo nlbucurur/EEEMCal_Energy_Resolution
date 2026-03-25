@@ -47,9 +47,6 @@
 #include <cmath>
 #include <algorithm>
 
-static constexpr int SAMPLES_PER_CHANNEL = 20;
-static constexpr int SIPMS_PER_CRYSTAL = 16; // keep fixed (your hardware)
-static constexpr int MAX_NUM_CRYSTALS = 25;  // keep fixed (your hardware)
 
 // ------------------------------------------------------------
 // Robust peak finder
@@ -194,7 +191,7 @@ void gain_match_one(const char *filename,
     gSystem->mkdir(outdir, true);
 
     // ---- Read mapping
-    auto mapping = read_mapping_csv(mapping_csv, SIPMS_PER_CRYSTAL);
+    auto mapping = read_mapping_csv(mapping_csv, LED_SIPMS_PER_CRYSTAL);
     if (mapping.empty())
     {
         std::cerr << "Error: mapping empty. Check mapping CSV: " << mapping_csv << "\n";
@@ -262,10 +259,10 @@ void gain_match_one(const char *filename,
     }
 
     const int n_adc = leaf_adc->GetLen();
-    if ((n_adc % SAMPLES_PER_CHANNEL) != 0)
+    if ((n_adc % LED_SAMPLES_PER_CHANNEL) != 0)
     {
         std::cerr << "Error: unexpected adc length n_adc=" << n_adc
-                  << " (not divisible by " << SAMPLES_PER_CHANNEL << ")\n";
+                  << " (not divisible by " << LED_SAMPLES_PER_CHANNEL << ")\n";
         file->Close();
         delete file;
         return;
@@ -283,7 +280,7 @@ void gain_match_one(const char *filename,
         }
     }
 
-    const int nch_from_file = n_adc / SAMPLES_PER_CHANNEL;
+    const int nch_from_file = n_adc / LED_SAMPLES_PER_CHANNEL;
 
     std::vector<uint32_t> adc_buf((size_t)n_adc);
     std::vector<uint32_t> tot_buf;
@@ -296,39 +293,24 @@ void gain_match_one(const char *filename,
 
     auto adc_at = [&](int ch, int t) -> uint32_t &
     {
-        return adc_buf[(size_t)ch * SAMPLES_PER_CHANNEL + (size_t)t];
+        return adc_buf[(size_t)ch * LED_SAMPLES_PER_CHANNEL + (size_t)t];
     };
     auto tot_at = [&](int ch, int t) -> uint32_t &
     {
-        return tot_buf[(size_t)ch * SAMPLES_PER_CHANNEL + (size_t)t];
+        return tot_buf[(size_t)ch * LED_SAMPLES_PER_CHANNEL + (size_t)t];
     };
 
     // ---- Build reverse map: channel -> (crystal, sipm)
-    std::unordered_map<int, std::pair<int, int>> reverse;
-    reverse.reserve(mapping.size() * SIPMS_PER_CRYSTAL);
-
-    for (const auto &kv : mapping)
-    {
-        const int crystal_id = kv.first;
-        auto chans = get_crystal_channels(mapping, crystal_id, SIPMS_PER_CRYSTAL);
-
-        for (int sipm = 0; sipm < SIPMS_PER_CRYSTAL; ++sipm)
-        {
-            const int ch = chans[sipm];
-            if (ch < 0)
-                continue;
-            reverse[ch] = {crystal_id, sipm};
-        }
-    }
+    auto reverse = build_reverse_channel_map(mapping, LED_SIPMS_PER_CRYSTAL);
 
     // ---- Create per-(crystal,sipm) histograms only for crystals in mapping
-    std::map<int, std::array<TH1F *, SIPMS_PER_CRYSTAL>> h_adc;
-    std::map<int, std::array<TH1F *, SIPMS_PER_CRYSTAL>> h_tot;
+    std::map<int, std::array<TH1F *, LED_SIPMS_PER_CRYSTAL>> h_adc;
+    std::map<int, std::array<TH1F *, LED_SIPMS_PER_CRYSTAL>> h_tot;
 
     for (const auto &kv : mapping)
     {
         const int crystal_id = kv.first;
-        for (int sipm = 0; sipm < SIPMS_PER_CRYSTAL; ++sipm)
+        for (int sipm = 0; sipm < LED_SIPMS_PER_CRYSTAL; ++sipm)
         {
             h_adc[crystal_id][sipm] = new TH1F(
                 Form("h_adc_%.3fV_cr%d_sipm%d", voltage, crystal_id, sipm),
@@ -344,7 +326,7 @@ void gain_match_one(const char *filename,
 
     // ---- Active channels (like led_analysis)
     // Use max_channels = nch_from_file so it adapts to 1 KCU vs many
-    auto active_channels = get_active_channels_from_mapping(mapping, SIPMS_PER_CRYSTAL, MAX_NUM_CRYSTALS, nch_from_file);
+    auto active_channels = get_active_channels_from_mapping(mapping, LED_SIPMS_PER_CRYSTAL, LED_MAX_NUM_CRYSTALS, nch_from_file);
 
     // ---- Event loop: loop active channels, route via reverse map
     const Long64_t nEntries = tree->GetEntries();
@@ -395,13 +377,13 @@ void gain_match_one(const char *filename,
 
     // ---- Fit peaks, compute gain factors
     // We'll store results in arrays indexed by (crystal_id,sipm), and also in a "global index" = crystal*16+sipm for legacy plots.
-    std::map<int, std::array<float, SIPMS_PER_CRYSTAL>> peak;
-    std::map<int, std::array<float, SIPMS_PER_CRYSTAL>> sigma;
+    std::map<int, std::array<float, LED_SIPMS_PER_CRYSTAL>> peak;
+    std::map<int, std::array<float, LED_SIPMS_PER_CRYSTAL>> sigma;
 
     for (const auto &kv : mapping)
     {
         const int crystal_id = kv.first;
-        for (int sipm_i = 0; sipm_i < SIPMS_PER_CRYSTAL; ++sipm_i)
+        for (int sipm_i = 0; sipm_i < LED_SIPMS_PER_CRYSTAL; ++sipm_i)
         {
             float pk = 0, sg = 0;
             TH1F *hist = h_adc[crystal_id][sipm_i];
@@ -419,7 +401,7 @@ void gain_match_one(const char *filename,
         float sum = 0.0f;
         int n = 0;
 
-        for (int sipm_i = 0; sipm_i < SIPMS_PER_CRYSTAL; ++sipm_i)
+        for (int sipm_i = 0; sipm_i < LED_SIPMS_PER_CRYSTAL; ++sipm_i)
         {
             if (exclude_from_crystal_mean(crystal_id, sipm_i))
                 continue;
@@ -435,11 +417,11 @@ void gain_match_one(const char *filename,
     }
 
     // Channel gain factors: crystal_mean / channel_peak
-    std::map<int, std::array<float, SIPMS_PER_CRYSTAL>> gain_factor;
+    std::map<int, std::array<float, LED_SIPMS_PER_CRYSTAL>> gain_factor;
     for (const auto &kv : mapping)
     {
         const int crystal_id = kv.first;
-        for (int sipm_i = 0; sipm_i < SIPMS_PER_CRYSTAL; ++sipm_i)
+        for (int sipm_i = 0; sipm_i < LED_SIPMS_PER_CRYSTAL; ++sipm_i)
         {
             const float pk = peak[crystal_id][sipm_i];
             const float cm = crystal_mean[crystal_id];
@@ -481,7 +463,7 @@ void gain_match_one(const char *filename,
         auto it = gain_factor.find(crystal_id);
         if (it == gain_factor.end())
             return;
-        if (sipm_i < 0 || sipm_i >= SIPMS_PER_CRYSTAL)
+        if (sipm_i < 0 || sipm_i >= LED_SIPMS_PER_CRYSTAL)
             return;
         it->second[sipm_i] = 0.0f;
     };
@@ -517,7 +499,7 @@ void gain_match_one(const char *filename,
         canvas->Clear();
         canvas->Divide(4, 4);
 
-        for (int sipm_i = 0; sipm_i < SIPMS_PER_CRYSTAL; ++sipm_i)
+        for (int sipm_i = 0; sipm_i < LED_SIPMS_PER_CRYSTAL; ++sipm_i)
         {
             canvas->cd(sipm_i + 1);
             TH1F *hist = h_adc[crystal_id][sipm_i];
@@ -539,19 +521,19 @@ void gain_match_one(const char *filename,
     TH1F *gain_hist = new TH1F("gain_factors", "Gain Factors;crystal*16+sipm;Gain Factor", 25 * 16, 0, 25 * 16);
     TH1F *crystal_gain_hist = new TH1F("crystal_factor", "Crystal Gain;Crystal;Gain Factor", 25, 0, 25);
 
-    for (int cr = 0; cr < MAX_NUM_CRYSTALS; ++cr)
+    for (int cr = 0; cr < LED_MAX_NUM_CRYSTALS; ++cr)
         crystal_gain_hist->SetBinContent(cr + 1, 1.0f);
 
     for (const auto &kv : mapping)
     {
         const int crystal_id = kv.first;
-        if (crystal_id >= 0 && crystal_id < MAX_NUM_CRYSTALS)
+        if (crystal_id >= 0 && crystal_id < LED_MAX_NUM_CRYSTALS)
             crystal_gain_hist->SetBinContent(crystal_id + 1, crystal_gain[crystal_id]);
 
-        for (int sipm_i = 0; sipm_i < SIPMS_PER_CRYSTAL; ++sipm_i)
+        for (int sipm_i = 0; sipm_i < LED_SIPMS_PER_CRYSTAL; ++sipm_i)
         {
-            const int idx = crystal_id * SIPMS_PER_CRYSTAL + sipm_i;
-            if (idx >= 0 && idx < MAX_NUM_CRYSTALS * SIPMS_PER_CRYSTAL)
+            const int idx = crystal_id * LED_SIPMS_PER_CRYSTAL + sipm_i;
+            if (idx >= 0 && idx < LED_MAX_NUM_CRYSTALS * LED_SIPMS_PER_CRYSTAL)
                 gain_hist->SetBinContent(idx + 1, gain_factor[crystal_id][sipm_i]);
         }
     }
@@ -593,9 +575,9 @@ void gain_match_one(const char *filename,
     for (const auto &kv : mapping)
     {
         const int crystal_id = kv.first;
-        auto chans = get_crystal_channels(mapping, crystal_id, SIPMS_PER_CRYSTAL);
+        auto chans = get_crystal_channels(mapping, crystal_id, LED_SIPMS_PER_CRYSTAL);
 
-        for (int sipm_i = 0; sipm_i < SIPMS_PER_CRYSTAL; ++sipm_i)
+        for (int sipm_i = 0; sipm_i < LED_SIPMS_PER_CRYSTAL; ++sipm_i)
         {
             t_crystal = crystal_id;
             t_sipm = sipm_i;

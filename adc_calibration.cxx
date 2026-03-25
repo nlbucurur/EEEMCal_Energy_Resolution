@@ -67,9 +67,6 @@
 #include <TFitResult.h>
 #include <TFitResultPtr.h>
 
-static constexpr int SAMPLES_PER_CHANNEL = 20;
-static constexpr int SIPMS_PER_CRYSTAL = 16;
-static constexpr int MAX_NUM_CRYSTALS = 25;
 static constexpr double WAVELENGTH_NM = 470.0; // for photon energy conversion
 
 // Photon energy helpers (for bookkeeping / optional conversions)
@@ -84,39 +81,9 @@ static inline double photon_energy_eV(double wavelength_nm)
 
 // ---------------------- small helpers ----------------------
 
-static int extract_run_number(const char *filename)
-{
-    std::string s(filename);
-    int run = -1;
-    size_t pos = s.find("Run");
-    if (pos != std::string::npos)
-    {
-        pos += 3;
-        std::string digits;
-        while (pos < s.size() && std::isdigit((unsigned char)s[pos]))
-        {
-            digits += s[pos];
-            pos++;
-        }
-        if (!digits.empty())
-            run = std::stoi(digits);
-    }
-    return run;
-}
-
-static void print_progress_25(int progress)
-{
-    std::cout << " [";
-    for (int i = 0; i < MAX_NUM_CRYSTALS; i++)
-        std::cout << (i < progress ? "*" : " ");
-    std::cout << "]\r" << std::flush;
-    if (progress >= MAX_NUM_CRYSTALS)
-        std::cout << "\n";
-}
-
 static int32_t get_toa_first_nonzero(uint32_t *toa_values)
 {
-    for (int i = 0; i < SAMPLES_PER_CHANNEL; ++i)
+    for (int i = 0; i < LED_SAMPLES_PER_CHANNEL; ++i)
     {
         if (toa_values[i] > 0)
             return (int32_t)toa_values[i];
@@ -126,46 +93,12 @@ static int32_t get_toa_first_nonzero(uint32_t *toa_values)
 
 static bool is_tot_event(uint32_t *tot_values)
 {
-    for (int i = 0; i < SAMPLES_PER_CHANNEL; ++i)
+    for (int i = 0; i < LED_SAMPLES_PER_CHANNEL; ++i)
     {
         if (tot_values[i] > (uint32_t)g_tot_min)
             return true;
     }
     return false;
-}
-
-// 5x5 geometry mapping used for COG (same layout you used before).
-static void build_xy_for_crystal(int crystal_id, float &x, float &y)
-{
-    // index -> crystal_id (row-major, top-left to bottom-right)
-    int crystal_mapping[MAX_NUM_CRYSTALS] = {
-        4, 9, 14, 19, 24,
-        3, 8, 13, 18, 23,
-        2, 7, 12, 17, 22,
-        1, 6, 11, 16, 21,
-        0, 5, 10, 15, 20};
-
-    int found = -1;
-    for (int i = 0; i < MAX_NUM_CRYSTALS; ++i)
-    {
-        if (crystal_mapping[i] == crystal_id)
-        {
-            found = i;
-            break;
-        }
-    }
-
-    if (found < 0)
-    {
-        x = -999;
-        y = -999;
-        return;
-    }
-
-    int row = found / 5; // 0..4
-    int col = found % 5; // 0..4
-    x = (float)col;
-    y = (float)row;
 }
 
 // COG: simple energy-weighted position (only crystals present in event_energy).
@@ -208,23 +141,7 @@ static bool calculate_cog(TH2 *distribution,
     if (!do_cut)
         return true;
 
-    float dx = (x_cog - cx) / sx;
-    float dy = (y_cog - cy) / sy;
-    return (dx * dx + dy * dy) <= 1.0f;
-}
-
-// Safe common-mode subtraction into a temporary waveform buffer
-static void subtract_common_mode(uint32_t out_adc[SAMPLES_PER_CHANNEL],
-                                 uint32_t *in_adc,
-                                 float cm)
-{
-    for (int i = 0; i < SAMPLES_PER_CHANNEL; ++i)
-    {
-        float v = (float)in_adc[i] - cm;
-        if (v < 0)
-            v = 0;
-        out_adc[i] = (uint32_t)(v + 0.5f);
-    }
+    return point_in_ellipse(x_cog, y_cog, cx, cy, sx, sy);
 }
 
 static bool extract_voltage_from_calib_filename(const std::string &name, double &voltage)
@@ -384,15 +301,15 @@ void adc_calibration_one(const char *filename,
     // const double EPHOTON_J  = EPHOTON_EV * EV_TO_J;
 
     // Per-crystal common-mode reference channels
-    // int common_mode_channels_by_crystal[MAX_NUM_CRYSTALS] = {
+    // int common_mode_channels_by_crystal[LED_MAX_NUM_CRYSTALS] = {
     //     224, 296, 188, 386, 152,
     //     512, 548, 242, 134, 404,
     //     206, 368, 332, 458, 8,
     //     440, 116, 350, 62, 98,
     //     422, 170, 260, 314, 278}; // used in DESY
 
-    int common_mode_channels_by_crystal[MAX_NUM_CRYSTALS];
-    for (int cr = 0; cr < MAX_NUM_CRYSTALS; ++cr)
+    int common_mode_channels_by_crystal[LED_MAX_NUM_CRYSTALS];
+    for (int cr = 0; cr < LED_MAX_NUM_CRYSTALS; ++cr)
         common_mode_channels_by_crystal[cr] = -1;
 
     // Only crystal 12 has CM on channel 44
@@ -411,7 +328,7 @@ void adc_calibration_one(const char *filename,
     int remaining_ids[16] = {0, 1, 2, 3, 4, 5, 6, 10, 11, 15, 16, 20, 21, 22, 23, 24};
 
     // ---------------- mapping ----------------
-    auto mapping = read_mapping_csv(mapping_csv, SIPMS_PER_CRYSTAL);
+    auto mapping = read_mapping_csv(mapping_csv, LED_SIPMS_PER_CRYSTAL);
     if (mapping.empty())
     {
         std::cerr << "ERROR: mapping empty. Check: " << mapping_csv << "\n";
@@ -419,20 +336,7 @@ void adc_calibration_one(const char *filename,
     }
 
     // reverse[channel] = (crystal, sipm)
-    std::unordered_map<int, std::pair<int, int>> reverse;
-    reverse.reserve(mapping.size() * SIPMS_PER_CRYSTAL);
-
-    for (const auto &kv : mapping)
-    {
-        int cr = kv.first;
-        auto chans = get_crystal_channels(mapping, cr, SIPMS_PER_CRYSTAL);
-        for (int sipm = 0; sipm < SIPMS_PER_CRYSTAL; ++sipm)
-        {
-            int ch = chans[sipm];
-            if (ch >= 0)
-                reverse[ch] = {cr, sipm};
-        }
-    }
+    auto reverse = build_reverse_channel_map(mapping, LED_SIPMS_PER_CRYSTAL);
 
     // ---------------- load gain factors ----------------
     TH1 *gain_factor = nullptr;
@@ -449,14 +353,14 @@ void adc_calibration_one(const char *filename,
     // Fallbacks
     if (!gain_factor)
     {
-        gain_factor = new TH1F("gain_factors_fallback", "gain_factors_fallback", MAX_NUM_CRYSTALS * SIPMS_PER_CRYSTAL, 0, MAX_NUM_CRYSTALS * SIPMS_PER_CRYSTAL);
-        for (int i = 1; i <= MAX_NUM_CRYSTALS * SIPMS_PER_CRYSTAL; ++i)
+        gain_factor = new TH1F("gain_factors_fallback", "gain_factors_fallback", LED_MAX_NUM_CRYSTALS * LED_SIPMS_PER_CRYSTAL, 0, LED_MAX_NUM_CRYSTALS * LED_SIPMS_PER_CRYSTAL);
+        for (int i = 1; i <= LED_MAX_NUM_CRYSTALS * LED_SIPMS_PER_CRYSTAL; ++i)
             gain_factor->SetBinContent(i, 1.0);
     }
     if (!crystal_gain_factor)
     {
-        crystal_gain_factor = new TH1F("crystal_factor_fallback", "crystal_factor_fallback", MAX_NUM_CRYSTALS, 0, MAX_NUM_CRYSTALS);
-        for (int i = 1; i <= MAX_NUM_CRYSTALS; ++i)
+        crystal_gain_factor = new TH1F("crystal_factor_fallback", "crystal_factor_fallback", LED_MAX_NUM_CRYSTALS, 0, LED_MAX_NUM_CRYSTALS);
+        for (int i = 1; i <= LED_MAX_NUM_CRYSTALS; ++i)
             crystal_gain_factor->SetBinContent(i, 1.0);
     }
 
@@ -528,10 +432,10 @@ void adc_calibration_one(const char *filename,
     TLeaf *leaf_toa = (br_toa ? br_toa->GetLeaf("toa") : nullptr);
 
     const int n_adc = leaf_adc->GetLen();
-    if (n_adc <= 0 || (n_adc % SAMPLES_PER_CHANNEL) != 0)
+    if (n_adc <= 0 || (n_adc % LED_SAMPLES_PER_CHANNEL) != 0)
     {
         std::cerr << "ERROR: unexpected adc length " << n_adc
-                  << " (not divisible by " << SAMPLES_PER_CHANNEL << ")\n";
+                  << " (not divisible by " << LED_SAMPLES_PER_CHANNEL << ")\n";
         f->Close();
         delete f;
         if (gf)
@@ -542,7 +446,7 @@ void adc_calibration_one(const char *filename,
         return;
     }
 
-    const int n_channels = n_adc / SAMPLES_PER_CHANNEL;
+    const int n_channels = n_adc / LED_SAMPLES_PER_CHANNEL;
 
     bool have_tot = (leaf_tot && leaf_tot->GetLen() == n_adc);
     bool have_toa = (leaf_toa && leaf_toa->GetLen() == n_adc);
@@ -569,14 +473,14 @@ void adc_calibration_one(const char *filename,
         tree->SetBranchAddress("toa", toa_buf.data());
 
     auto adc_ptr = [&](int ch) -> uint32_t *
-    { return &adc_buf[(size_t)ch * SAMPLES_PER_CHANNEL]; };
+    { return &adc_buf[(size_t)ch * LED_SAMPLES_PER_CHANNEL]; };
     auto tot_ptr = [&](int ch) -> uint32_t *
-    { return &tot_buf[(size_t)ch * SAMPLES_PER_CHANNEL]; };
+    { return &tot_buf[(size_t)ch * LED_SAMPLES_PER_CHANNEL]; };
     auto toa_ptr = [&](int ch) -> uint32_t *
-    { return &toa_buf[(size_t)ch * SAMPLES_PER_CHANNEL]; };
+    { return &toa_buf[(size_t)ch * LED_SAMPLES_PER_CHANNEL]; };
 
     // Active channels based on mapping, bounded by file channels
-    auto active_channels = get_active_channels_from_mapping(mapping, SIPMS_PER_CRYSTAL, MAX_NUM_CRYSTALS, n_channels);
+    auto active_channels = get_active_channels_from_mapping(mapping, LED_SIPMS_PER_CRYSTAL, LED_MAX_NUM_CRYSTALS, n_channels);
 
     // ---------------- Histograms (global) ----------------
     TH1 *central_crystal_energy = new TH1F("central_crystal_energy",
@@ -607,8 +511,8 @@ void adc_calibration_one(const char *filename,
 
     // E vs ToA for central crystal SiPMs
     std::vector<TH2 *> E_vs_toa;
-    E_vs_toa.reserve(SIPMS_PER_CRYSTAL);
-    for (int sipm = 0; sipm < SIPMS_PER_CRYSTAL; sipm++)
+    E_vs_toa.reserve(LED_SIPMS_PER_CRYSTAL);
+    for (int sipm = 0; sipm < LED_SIPMS_PER_CRYSTAL; sipm++)
     {
         E_vs_toa.push_back(new TH2F(Form("E_vs_toa_sipm_%d", sipm),
                                     Form("Central Crystal SiPM %d: Energy vs ToA;ToA;Energy (ADC)", sipm),
@@ -616,11 +520,11 @@ void adc_calibration_one(const char *filename,
     }
 
     // ToA correlations (central crystal only)
-    std::vector<std::vector<TH2 *>> toa_correlations(SIPMS_PER_CRYSTAL);
-    for (int i = 0; i < SIPMS_PER_CRYSTAL; i++)
+    std::vector<std::vector<TH2 *>> toa_correlations(LED_SIPMS_PER_CRYSTAL);
+    for (int i = 0; i < LED_SIPMS_PER_CRYSTAL; i++)
     {
-        toa_correlations[i].reserve(SIPMS_PER_CRYSTAL);
-        for (int j = 0; j < SIPMS_PER_CRYSTAL; j++)
+        toa_correlations[i].reserve(LED_SIPMS_PER_CRYSTAL);
+        for (int j = 0; j < LED_SIPMS_PER_CRYSTAL; j++)
         {
             toa_correlations[i].push_back(new TH2F(Form("toa_correlation_sipm_%02d_sipm_%02d", i, j),
                                                    Form("Central crystal: SiPM %02d vs %02d ToA;SiPM %02d ToA;SiPM %02d ToA", i, j, i, j),
@@ -630,15 +534,15 @@ void adc_calibration_one(const char *filename,
 
     // ---------------- per-crystal/per-sipm histograms ----------------
     // Allocate for 25 crystals, but only fill when that crystal exists in mapping.
-    std::vector<std::array<TH1F *, SIPMS_PER_CRYSTAL>> sipm_energy(MAX_NUM_CRYSTALS);
-    std::vector<std::array<TH2F *, SIPMS_PER_CRYSTAL>> sipm_waveform(MAX_NUM_CRYSTALS);
-    std::vector<TH1F *> crystal_energy(MAX_NUM_CRYSTALS, nullptr);
-    std::vector<TH1F *> crystal_energy_shares(MAX_NUM_CRYSTALS, nullptr);
-    std::vector<TH2F *> crystal_common_mode(MAX_NUM_CRYSTALS, nullptr);
+    std::vector<std::array<TH1F *, LED_SIPMS_PER_CRYSTAL>> sipm_energy(LED_MAX_NUM_CRYSTALS);
+    std::vector<std::array<TH2F *, LED_SIPMS_PER_CRYSTAL>> sipm_waveform(LED_MAX_NUM_CRYSTALS);
+    std::vector<TH1F *> crystal_energy(LED_MAX_NUM_CRYSTALS, nullptr);
+    std::vector<TH1F *> crystal_energy_shares(LED_MAX_NUM_CRYSTALS, nullptr);
+    std::vector<TH2F *> crystal_common_mode(LED_MAX_NUM_CRYSTALS, nullptr);
 
-    for (int cr = 0; cr < MAX_NUM_CRYSTALS; ++cr)
+    for (int cr = 0; cr < LED_MAX_NUM_CRYSTALS; ++cr)
     {
-        for (int sipm = 0; sipm < SIPMS_PER_CRYSTAL; ++sipm)
+        for (int sipm = 0; sipm < LED_SIPMS_PER_CRYSTAL; ++sipm)
         {
             sipm_energy[cr][sipm] = new TH1F(Form("crystal_%02d_sipm_%02d_energy", cr, sipm),
                                              Form("Crystal %02d SiPM %02d Energy;Energy (ADC);Events", cr, sipm),
@@ -684,9 +588,9 @@ void adc_calibration_one(const char *filename,
 
     for (Long64_t entry = 0; entry < nentries; ++entry)
     {
-        if ((int)(entry * MAX_NUM_CRYSTALS / nentries) > complete)
+        if ((int)(entry * LED_MAX_NUM_CRYSTALS / nentries) > complete)
         {
-            complete = (int)(entry * MAX_NUM_CRYSTALS / nentries);
+            complete = (int)(entry * LED_MAX_NUM_CRYSTALS / nentries);
             print_progress_25(complete);
         }
 
@@ -707,7 +611,7 @@ void adc_calibration_one(const char *filename,
         if (have_toa && mapping.count(central_crystal_id))
         {
             // use central crystal sipm 0 as reference ToA channel
-            int ch0 = get_crystal_channels(mapping, central_crystal_id, SIPMS_PER_CRYSTAL)[0];
+            int ch0 = get_crystal_channels(mapping, central_crystal_id, LED_SIPMS_PER_CRYSTAL)[0];
             if (ch0 >= 0 && ch0 < n_channels)
             {
                 uint32_t *toa0 = toa_ptr(ch0);
@@ -734,13 +638,13 @@ void adc_calibration_one(const char *filename,
             int cr = it->second.first;
             int sipm = it->second.second;
 
-            if (cr < 0 || cr >= MAX_NUM_CRYSTALS || sipm < 0 || sipm >= SIPMS_PER_CRYSTAL)
+            if (cr < 0 || cr >= LED_MAX_NUM_CRYSTALS || sipm < 0 || sipm >= LED_SIPMS_PER_CRYSTAL)
                 continue;
             if (!mapping.count(cr))
                 continue; // ignore crystals not present
 
             // gain
-            float gain = gain_factor->GetBinContent(cr * SIPMS_PER_CRYSTAL + sipm + 1);
+            float gain = gain_factor->GetBinContent(cr * LED_SIPMS_PER_CRYSTAL + sipm + 1);
 
             // common-mode (optional, per crystal)
             float cm = 0.0f;
@@ -759,7 +663,7 @@ void adc_calibration_one(const char *filename,
                         cm_ok[cr] = true;
 
                         // record CM waveform
-                        for (int s = 0; s < SAMPLES_PER_CHANNEL; ++s)
+                        for (int s = 0; s < LED_SAMPLES_PER_CHANNEL; ++s)
                         {
                             crystal_common_mode[cr]->Fill(s, cm_adc[s]);
                         }
@@ -778,7 +682,7 @@ void adc_calibration_one(const char *filename,
             }
 
             // prepare waveform pointer (with optional CM subtraction)
-            uint32_t adc_corr[SAMPLES_PER_CHANNEL];
+            uint32_t adc_corr[LED_SAMPLES_PER_CHANNEL];
             uint32_t *adc_used = adc_ptr(ch);
             if (do_cm)
             {
@@ -813,7 +717,7 @@ void adc_calibration_one(const char *filename,
             int i1 = -1, i2 = -1, i3 = -1;
             float max1 = -1e9f, max2 = -1e9f, max3 = -1e9f;
 
-            for (int s = 0; s < SAMPLES_PER_CHANNEL; ++s)
+            for (int s = 0; s < LED_SAMPLES_PER_CHANNEL; ++s)
             {
                 sipm_waveform[cr][sipm]->Fill(s, adc_used[s]);
 
@@ -868,7 +772,7 @@ void adc_calibration_one(const char *filename,
                     // which sample had the first non-zero TOA?
                     int timebin = -1;
                     uint32_t *tv = toa_ptr(ch);
-                    for (int s = 0; s < SAMPLES_PER_CHANNEL; ++s)
+                    for (int s = 0; s < LED_SAMPLES_PER_CHANNEL; ++s)
                     {
                         if (tv[s] > 0)
                         {
@@ -882,8 +786,8 @@ void adc_calibration_one(const char *filename,
                     E_vs_toa[sipm]->Fill(toa_val, channel_signal);
 
                     // correlations with other central SiPMs
-                    auto chans = get_crystal_channels(mapping, central_crystal_id, SIPMS_PER_CRYSTAL);
-                    for (int other = 0; other < SIPMS_PER_CRYSTAL; ++other)
+                    auto chans = get_crystal_channels(mapping, central_crystal_id, LED_SIPMS_PER_CRYSTAL);
+                    for (int other = 0; other < LED_SIPMS_PER_CRYSTAL; ++other)
                     {
                         if (other == sipm)
                             continue;
@@ -933,7 +837,7 @@ void adc_calibration_one(const char *filename,
                 central_nine_signal += signals[cr];
         }
 
-        for (int i = 0; i < SIPMS_PER_CRYSTAL; i++)
+        for (int i = 0; i < LED_SIPMS_PER_CRYSTAL; i++)
         {
             int cr = remaining_ids[i];
             if (signals.count(cr))
@@ -957,7 +861,7 @@ void adc_calibration_one(const char *filename,
         // per-crystal energy + share
         if (total_signal > 0)
         {
-            for (int cr = 0; cr < MAX_NUM_CRYSTALS; cr++)
+            for (int cr = 0; cr < LED_MAX_NUM_CRYSTALS; cr++)
             {
                 if (!signals.count(cr))
                     continue;
@@ -970,7 +874,7 @@ void adc_calibration_one(const char *filename,
         }
     }
 
-    print_progress_25(MAX_NUM_CRYSTALS);
+    print_progress_25(LED_MAX_NUM_CRYSTALS);
 
     std::cout << "Total ToT-tagged events: " << tot_events << " out of " << nentries << "\n";
 
@@ -980,7 +884,7 @@ void adc_calibration_one(const char *filename,
     // Here renamed:
     //   signal_for_ref = mean(crystal_energy) / mean(crystal_energy_share)
     // where "ref" is defined by voltage 1.27 V or 1.25 V.
-    int crystal_mapping_for_plots[MAX_NUM_CRYSTALS] = {
+    int crystal_mapping_for_plots[LED_MAX_NUM_CRYSTALS] = {
         4, 9, 14, 19, 24,
         3, 8, 13, 18, 23,
         2, 7, 12, 17, 22,
@@ -991,7 +895,7 @@ void adc_calibration_one(const char *filename,
     float mean_calib = 0.0f;
     int n_used = 0;
 
-    for (int i = 0; i < MAX_NUM_CRYSTALS; i++)
+    for (int i = 0; i < LED_MAX_NUM_CRYSTALS; i++)
     {
         int cr = crystal_mapping_for_plots[i];
         if (!mapping.count(cr))
@@ -1168,7 +1072,7 @@ void adc_calibration_one(const char *filename,
     // crystal energy (5x5 pages)
     canvas->Clear();
     canvas->Divide(5, 5);
-    for (int i = 0; i < MAX_NUM_CRYSTALS; i++)
+    for (int i = 0; i < LED_MAX_NUM_CRYSTALS; i++)
     {
         canvas->cd(i + 1);
         int cr = crystal_mapping_for_plots[i];
@@ -1182,7 +1086,7 @@ void adc_calibration_one(const char *filename,
     float mean_calib_check = 0.0f;
     int used_check = 0;
 
-    for (int i = 0; i < MAX_NUM_CRYSTALS; i++)
+    for (int i = 0; i < LED_MAX_NUM_CRYSTALS; i++)
     {
         canvas->cd(i + 1);
         int cr = crystal_mapping_for_plots[i];
@@ -1212,14 +1116,14 @@ void adc_calibration_one(const char *filename,
     gPad->SetLogx(0);
 
     // per-crystal pages: sipm energy + waveform + CM waveform
-    for (int cr = 0; cr < MAX_NUM_CRYSTALS; cr++)
+    for (int cr = 0; cr < LED_MAX_NUM_CRYSTALS; cr++)
     {
         if (!mapping.count(cr))
             continue;
 
         canvas->Clear();
         canvas->Divide(4, 4);
-        for (int sipm = 0; sipm < SIPMS_PER_CRYSTAL; sipm++)
+        for (int sipm = 0; sipm < LED_SIPMS_PER_CRYSTAL; sipm++)
         {
             canvas->cd(sipm + 1);
             sipm_energy[cr][sipm]->Draw("hist e");
@@ -1228,7 +1132,7 @@ void adc_calibration_one(const char *filename,
 
         canvas->Clear();
         canvas->Divide(4, 4);
-        for (int sipm = 0; sipm < SIPMS_PER_CRYSTAL; sipm++)
+        for (int sipm = 0; sipm < LED_SIPMS_PER_CRYSTAL; sipm++)
         {
             canvas->cd(sipm + 1);
             sipm_waveform[cr][sipm]->Draw("colz");
@@ -1255,7 +1159,7 @@ void adc_calibration_one(const char *filename,
 
     canvas->Clear();
     canvas->Divide(4, 4);
-    for (int sipm = 0; sipm < SIPMS_PER_CRYSTAL; sipm++)
+    for (int sipm = 0; sipm < LED_SIPMS_PER_CRYSTAL; sipm++)
     {
         canvas->cd(sipm + 1);
         E_vs_toa[sipm]->Draw("colz");
@@ -1271,13 +1175,13 @@ void adc_calibration_one(const char *filename,
     // ToA correlation matrix (central crystal)
     TCanvas *canvas2 = new TCanvas("toa_correlations_canvas", "", 8000, 8000);
     canvas2->Divide(16, 16, 0.0005, 0.0005);
-    for (int i = 0; i < SIPMS_PER_CRYSTAL; i++)
+    for (int i = 0; i < LED_SIPMS_PER_CRYSTAL; i++)
     {
-        for (int j = 0; j < SIPMS_PER_CRYSTAL; j++)
+        for (int j = 0; j < LED_SIPMS_PER_CRYSTAL; j++)
         {
             if (j <= i)
             {
-                canvas2->cd(i * SIPMS_PER_CRYSTAL + j + 1);
+                canvas2->cd(i * LED_SIPMS_PER_CRYSTAL + j + 1);
                 toa_correlations[i][j]->Draw("colz");
             }
         }
@@ -1365,27 +1269,27 @@ void adc_calibration_one(const char *filename,
     second_max_sample_index->Write();
     third_max_sample_index->Write();
 
-    for (int sipm = 0; sipm < SIPMS_PER_CRYSTAL; ++sipm)
+    for (int sipm = 0; sipm < LED_SIPMS_PER_CRYSTAL; ++sipm)
     {
         E_vs_toa[sipm]->Write();
     }
 
-    for (int i = 0; i < SIPMS_PER_CRYSTAL; i++)
+    for (int i = 0; i < LED_SIPMS_PER_CRYSTAL; i++)
     {
-        for (int j = 0; j < SIPMS_PER_CRYSTAL; j++)
+        for (int j = 0; j < LED_SIPMS_PER_CRYSTAL; j++)
         {
             toa_correlations[i][j]->Write();
         }
     }
 
-    for (int cr = 0; cr < MAX_NUM_CRYSTALS; ++cr)
+    for (int cr = 0; cr < LED_MAX_NUM_CRYSTALS; ++cr)
     {
         if (!mapping.count(cr))
             continue;
         crystal_energy[cr]->Write();
         crystal_energy_shares[cr]->Write();
         crystal_common_mode[cr]->Write();
-        for (int sipm = 0; sipm < SIPMS_PER_CRYSTAL; ++sipm)
+        for (int sipm = 0; sipm < LED_SIPMS_PER_CRYSTAL; ++sipm)
         {
             sipm_energy[cr][sipm]->Write();
             sipm_waveform[cr][sipm]->Write();
