@@ -5,7 +5,7 @@
 //  - Uses common_led.{h,cxx} mapping + signal helpers
 //  - Reads adc/tot as flat buffers using TLeaf::GetLen() (dynamic sizes)
 //  - Uses mapping CSV produced by generate_mapping.py
-//  - Keeps the original purpose: calibrate ToT response vs "(ref - missing)" for ToT events
+//  - Keeps the original purpose: calibrate ToT response vs "(ref - missing energy)" for ToT events
 //
 // IMPORTANT about the x-axis:
 //  - In the original Tristan code this was (beam_energy[GeV] - noncentral_energy[GeV]).
@@ -66,57 +66,21 @@
 //========================================================//
 // ADC calibration reference voltage used by adc_calibration.cxx
 static float g_adc_ref_voltage_V = 1.259f;
-static std::set<int> g_selected_central_sipms = {15}; // choose 0..15
-static bool g_scale_subset_to_16 = false;
+static bool g_scale_subset_to_16 = false; // if true, then if all 16 central channels are chosen, we scale their sum to 16 before conversion, then scale back after conversion. This mimics the behavior of adc_calibration.cxx where we always scale to 16 channels before conversion.
 //========================================================//
 //==============       Change this        ================//
 //========================================================//
 
-
 // ----- knobs (keep same defaults as Tristan's original) -----
 static float g_energy_fraction_cut = 0.30f; // used in COG selection
-static long g_max_events = 1000000;
 static float g_tot_min_cut = 0.0f; // if ToT sum < this -> set to 0
-
-// crystals to ignore (e.g., Tristan ignored crystal 9)
-// Edit this list to ignore additional crystals during the analysis.
-static std::vector<int> g_skip_crystals = {9, 15};
-
-static inline bool is_skipped_crystal(int cr)
-{
-    return std::find(g_skip_crystals.begin(), g_skip_crystals.end(), cr) != g_skip_crystals.end();
-}
-
-static inline bool use_selected_central_sipm(int sipm)
-{
-    return g_selected_central_sipms.empty() ||
-           g_selected_central_sipms.count(sipm) > 0;
-}
-
-// COG ellipse cut (adjust if needed)
-static bool g_do_cog_ellipse_cut = true;
-static float g_cog_cx = 2.0f;
-static float g_cog_cy = 2.0f;
-static float g_cog_sx = 0.80f;
-static float g_cog_sy = 0.80f;
 
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
 
-static void mkdir_p(const char *dir)
-{
-    if (!dir)
-        return;
-    struct stat st;
-    if (stat(dir, &st) != 0)
-    {
-        mkdir(dir, 0755);
-    }
-}
-
 // Compute and optionally cut on COG, and optionally cut on central9 fraction.
-static bool calculate_cog(TH2 *distribution,
+static bool calculate_cog_tot(TH2 *distribution,
                           const std::array<float, LED_MAX_NUM_CRYSTALS> &signals)
 {
     // total
@@ -230,42 +194,6 @@ static float load_adc_to_ref(const char *adc_calib_root, float ref_voltage)
     delete f;
 
     return val;
-}
-
-// Load gain factors produced by gain_match.cxx
-static void load_gain_factors(const char *gain_root,
-                              TH1 *&gain_factors,
-                              TH1 *&crystal_factor,
-                              TFile *&gain_file_handle)
-{
-    gain_factors = nullptr;
-    crystal_factor = nullptr;
-    gain_file_handle = nullptr;
-
-    if (gain_root)
-    {
-        gain_file_handle = TFile::Open(gain_root, "READ");
-        if (gain_file_handle && !gain_file_handle->IsZombie())
-        {
-            gain_factors = (TH1 *)gain_file_handle->Get("gain_factors");
-            crystal_factor = (TH1 *)gain_file_handle->Get("crystal_factor");
-        }
-    }
-
-    // Fallback to unity
-    if (!gain_factors)
-    {
-        gain_factors = new TH1F("gain_factors_unity", "Gain Factors;crystal*16+sipm;Gain", LED_MAX_NUM_CRYSTALS * LED_SIPMS_PER_CRYSTAL, 0, LED_MAX_NUM_CRYSTALS * LED_SIPMS_PER_CRYSTAL);
-        for (int i = 1; i <= gain_factors->GetNbinsX(); ++i)
-            gain_factors->SetBinContent(i, 1.0);
-    }
-
-    if (!crystal_factor)
-    {
-        crystal_factor = new TH1F("crystal_factor_unity", "Crystal Factors;crystal;Gain", LED_MAX_NUM_CRYSTALS, 0, LED_MAX_NUM_CRYSTALS);
-        for (int i = 1; i <= crystal_factor->GetNbinsX(); ++i)
-            crystal_factor->SetBinContent(i, 1.0);
-    }
 }
 
 static bool compute_resolution_pct(const TH1 *h,
@@ -464,11 +392,12 @@ static bool tot_calibration_one(const char *filename,
 
         float tot_sum = 0.0f;
         int used = 0;
-        const int n_expected = (int)g_selected_central_sipms.size();
+        const int n_expected =
+            count_selected_sipms_in_mapping(mapping, central_crystal, LED_SIPMS_PER_CRYSTAL);
 
         for (int sipm = 0; sipm < LED_SIPMS_PER_CRYSTAL; ++sipm)
         {
-            if (!use_selected_central_sipm(sipm))
+            if (!use_selected_sipm(central_crystal, sipm))
                 continue;
 
             if (sipm >= (int)center_chans.size())
@@ -487,7 +416,8 @@ static bool tot_calibration_one(const char *filename,
                 break;
             }
 
-            const uint32_t raw_tot = get_tot_first(tot_vals);
+            // const uint32_t raw_tot = get_tot_first(tot_vals);
+            const uint32_t raw_tot = get_tot_max(tot_vals);
 
             // optional width cuts per SiPM (based on histogram made by this macro)
             if (use_widths && widths_hist)
@@ -530,9 +460,9 @@ static bool tot_calibration_one(const char *filename,
 
         // COG cut (use ToT proxy for central crystal so ToT-only / ADC-empty runs still work)
         std::array<float, LED_MAX_NUM_CRYSTALS> cog_w = signals; // noncentral ADC (maybe 0)
-        cog_w[central_crystal] = tot_sum;                    // central ToT proxy
+        cog_w[central_crystal] = tot_sum;                        // central ToT proxy
         // COG cut (also fills h_cog)
-        if (!calculate_cog(h_cog, cog_w))
+        if (!calculate_cog_tot(h_cog, cog_w))
             continue;
 
         // total ToT distribution
@@ -670,11 +600,13 @@ void tot_calib_scan(const char *data_dir = "data",
     // ------------------ Global output histograms ------------------
     TH2F *total_dist = new TH2F("tot_vs_label_minus_missing",
                                 "ToT vs (label - missing);label - missing (V);ToT sum (a.u.)",
-                                120, 0, 2.5, 1200, 0, 60000);
+                                // 120, 0, 2.5, 1200, 0, 60000);
+                                120, 0, 2.5, 1200, 0, 4000);
 
     TH2F *total_invt = new TH2F("label_minus_missing_vs_tot",
                                 "label-missing as f(ToT);ToT sum (a.u.);label - missing (V)",
-                                1200, 0, 60000, 120, 0, 2.5);
+                                // 1200, 0, 60000, 120, 0, 2.5);
+                                1200, 0, 4000, 120, 0, 2.5);
 
     // Per-run containers (so we can also build widths if needed)
     struct RunOut
@@ -715,11 +647,12 @@ void tot_calib_scan(const char *data_dir = "data",
 
         o.tot = new TH1F(Form("run%03d_tot_sum", runnum),
                          Form("Run %03d ToT sum;ToT sum (a.u.);Events", runnum),
-                         1200, 0, 60000);
+                        //  1200, 0, 60000);
+                         1200, 0, 4000);
 
         o.tot2d = new TH2F(Form("run%03d_tot_vs_label_minus_missing", runnum),
                            Form("Run %03d ToT vs (label-missing);label-missing (V);ToT sum (a.u.)", runnum),
-                           120, 0, 2.5, 1200, 0, 60000);
+                           120, 0, 2.5, 1200, 0, 4000);
 
         o.cog = new TH2F(Form("run%03d_cog", runnum),
                          Form("Run %03d COG;X (crystals);Y (crystals)", runnum),
@@ -854,7 +787,7 @@ void tot_calib_scan(const char *data_dir = "data",
     // ------------------ PDF summary ------------------
     std::cout << "\nInit PDF summary to " << outdir << "\n";
     std::string pdf = std::string(Form("%s/tot_calib.pdf", outdir));
-    TCanvas *canvas = new TCanvas("tot_calib", "", 900, 700);
+    TCanvas *canvas = new TCanvas("tot_calib", "", 1680, 720);
     TLatex text;
     text.SetNDC();
     text.SetTextSize(0.04);
@@ -901,8 +834,32 @@ void tot_calib_scan(const char *data_dir = "data",
         {
             pad->cd(sipm + 1);
             TH1F *h = o.per_sipm[sipm];
+            if (!h)
+                continue;
+
             h->SetTitle("");
             h->Draw("hist");
+
+            TLatex lab;
+            lab.SetNDC();
+            lab.SetTextSize(0.08);
+
+            // Skip SiPMs that are not part of the selected subset
+            if (!use_selected_sipm(central_crystal, sipm))
+            {
+                lab.SetTextColor(kRed);
+                lab.DrawLatex(0.5, 0.5, "Not used");
+                continue;
+            }
+
+            // Skip empty or pathological histograms
+            if (h->GetEntries() < 5 || h->GetRMS() <= 0.0 || h->GetMaximum() <= 0.0)
+            {
+                lab.DrawLatex(0.25, 0.82, "empty");
+                peak_mean[ir][sipm] = 0.0;
+                peak_sigma[ir][sipm] = 0.0;
+                continue;
+            }
 
             // Gaussian fit around max bin (same spirit as old macro)
             const float mean0 = h->GetBinCenter(h->GetMaximumBin());
@@ -923,10 +880,20 @@ void tot_calib_scan(const char *data_dir = "data",
                 fit2.SetParameter(0, h->GetMaximum());
                 fit2.SetParameter(1, mean0);
                 fit2.SetParameter(2, 200.0f);
-                h->Fit(&fit2, "RQS");
-                peak_mean[ir][sipm] = fit2.GetParameter(1);
-                peak_sigma[ir][sipm] = fit2.GetParameter(2);
-                fit2.Draw("same");
+
+                TFitResultPtr r2 = h->Fit(&fit2, "RQS");
+                if (r2.Get() && r2->Status() == 0)
+                {
+                    peak_mean[ir][sipm] = fit2.GetParameter(1);
+                    peak_sigma[ir][sipm] = fit2.GetParameter(2);
+                    fit2.Draw("same");
+                }
+                else
+                {
+                    lab.DrawLatex(0.28, 0.82, "fit failed");
+                    peak_mean[ir][sipm] = 0.0;
+                    peak_sigma[ir][sipm] = 0.0;
+                }
             }
             else
             {
@@ -1009,9 +976,12 @@ void tot_calib_scan(const char *data_dir = "data",
     TProfile *p = total_invt->ProfileX("p_label_minus_missing_vs_tot");
     p->SetTitle("Profile: label-missing vs ToT;ToT;#LT label-missing#GT (V)");
 
-    TF1 *fit_all = new TF1("fit_all", "pol2", 20000, 55000);
-    TF1 *fit_mid = new TF1("fit_mid", "pol1", 14000, 23200);
-    TF1 *fit_hi = new TF1("fit_hi", "pol1", 30000, 60000);
+    // TF1 *fit_all = new TF1("fit_all", "pol2", 20000, 55000);
+    TF1 *fit_all = new TF1("fit_all", "pol2", 0, 6000);
+    // TF1 *fit_mid = new TF1("fit_mid", "pol1", 14000, 23200);
+    TF1 *fit_mid = new TF1("fit_mid", "pol1", 0, 5000);
+    // TF1 *fit_hi = new TF1("fit_hi", "pol1", 30000, 60000);
+    TF1 *fit_hi = new TF1("fit_hi", "pol1", 0, 5000);
 
     fit_hi->SetLineColor(kRed);
     fit_mid->SetLineColor(kGreen + 2);

@@ -1,0 +1,5 @@
+# voltage[V] mean_adc_to_ref_calibration central_energy_res_pct central_energy_res_pct_err
+1.250 257.231384 14.985658 0.106781
+1.259 438.376068 11.351442 0.080184
+1.268 660.154907 9.299650 0.069286
+1.277 1009.649414 7.667106 0.054277
