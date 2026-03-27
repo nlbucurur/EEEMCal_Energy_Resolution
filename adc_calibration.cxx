@@ -485,11 +485,11 @@ void adc_calibration_one(const char *filename,
     // ---------------- Histograms (global) ----------------
     TH1 *central_crystal_energy = new TH1F("central_crystal_energy",
                                            Form("Central Crystal Energy (%.3f V);Energy (ADC);Events", voltage),
-                                           500, 0, 75000);
+                                           500, 0, 6000);
 
     TH1 *central_nine_energy = new TH1F("central_nine_energy",
                                         Form("Central 3x3 Energy (%.3f V);Energy (ADC);Events", voltage),
-                                        500, 0, 75000);
+                                        500, 0, 20000);
 
     TH1 *total_energy = new TH1F("total_energy",
                                  Form("Total Energy (%.3f V);Energy (ADC);Events", voltage),
@@ -610,16 +610,21 @@ void adc_calibration_one(const char *filename,
         bool outside_toa_range = false;
         if (have_toa && mapping.count(central_crystal_id))
         {
-            // use central crystal sipm 0 as reference ToA channel
-            int ch0 = get_crystal_channels(mapping, central_crystal_id, LED_SIPMS_PER_CRYSTAL)[0];
-            if (ch0 >= 0 && ch0 < n_channels)
+            // use central crystal sipm as reference ToA channel
+            int sipm_ref = first_selected_sipm_in_mapping(mapping, central_crystal_id, LED_SIPMS_PER_CRYSTAL);
+            if (sipm_ref >= 0)
             {
-                uint32_t *toa0 = toa_ptr(ch0);
-                int32_t central_toa = get_toa_first_nonzero(toa0);
-                if (central_toa > 0)
+                int ch0 = get_crystal_channels(mapping, central_crystal_id, LED_SIPMS_PER_CRYSTAL)[sipm_ref];
+
+                if (ch0 >= 0 && ch0 < n_channels)
                 {
-                    if (central_toa < 200 || central_toa > 800)
-                        outside_toa_range = true;
+                    uint32_t *toa0 = toa_ptr(ch0);
+                    int32_t central_toa = get_toa_first_nonzero(toa0);
+                    if (central_toa > 0)
+                    {
+                        if (central_toa < 200 || central_toa > 800)
+                            outside_toa_range = true;
+                    }
                 }
             }
         }
@@ -642,6 +647,9 @@ void adc_calibration_one(const char *filename,
                 continue;
             if (!mapping.count(cr))
                 continue; // ignore crystals not present
+
+            if (!use_selected_sipm(cr, sipm))
+                continue;
 
             // gain
             float gain = gain_factor->GetBinContent(cr * LED_SIPMS_PER_CRYSTAL + sipm + 1);
@@ -789,6 +797,8 @@ void adc_calibration_one(const char *filename,
                     auto chans = get_crystal_channels(mapping, central_crystal_id, LED_SIPMS_PER_CRYSTAL);
                     for (int other = 0; other < LED_SIPMS_PER_CRYSTAL; ++other)
                     {
+                        if (!use_selected_sipm(central_crystal_id, other))
+                            continue;
                         if (other == sipm)
                             continue;
                         int ch_other = chans[other];
@@ -1340,7 +1350,7 @@ void adc_calib_scan(const char *data_dir = "data",
         {170, 1.25f},
         {171, 1.259f},
         {172, 1.268f},
-        {173, 1.277f}//,
+        {173, 1.277f} //,
         // {174, 1.286f},
         // {175, 1.295f},
         // {176, 1.304f},

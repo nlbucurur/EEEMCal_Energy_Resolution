@@ -11,6 +11,7 @@
 
 class TH1;
 class TF1;
+class TFile;
 
 // ===== Shared geometry / DAQ constants =====
 constexpr int LED_SAMPLES_PER_CHANNEL = 20;
@@ -21,6 +22,36 @@ constexpr int LED_MAX_NUM_CRYSTALS = 25;
 extern int g_signal_method; // 2, 3, 4, 5, 7 (7 = waveform crystal ball fit)
 extern int g_sipms_to_use; // Number of SiPMs to use per crystal (= 16)
 extern uint32_t g_tot_min; // Minimum ToT value to consider valid
+
+extern int g_selected_crystal_id;
+extern std::set<int> g_selected_central_sipms;
+
+extern std::vector<int> g_skip_crystals;
+//========================================================//
+//==============       Change this        ================//
+//========================================================//
+
+bool is_skipped_crystal(int cr);
+
+// shared run / COG controls
+extern long g_max_events;
+extern bool g_do_cog_ellipse_cut;
+extern float g_cog_cx;
+extern float g_cog_cy;
+extern float g_cog_sx;
+extern float g_cog_sy;
+
+bool use_selected_sipm(int crystal, int sipm);
+
+int first_selected_sipm_in_mapping(
+    const std::map<int, std::vector<int>>& mapping,
+    int crystal,
+    int expected_sipms_per_crystal = LED_SIPMS_PER_CRYSTAL);
+
+int count_selected_sipms_in_mapping(
+    const std::map<int, std::vector<int>>& mapping,
+    int crystal,
+    int expected_sipms_per_crystal = LED_SIPMS_PER_CRYSTAL);
 
 // ===== Generic helpers shared by the LED analysis macros =====
 int extract_run_number(const char* filename);
@@ -84,5 +115,13 @@ void draw_text_basic(TF1* fit,
                      const std::string& label1,
                      const std::string& label2 = "",
                      const std::string& label3 = "");
+
+void mkdir_p(const char *dir);
+
+// Load gain factors produced by gain_match.cxx
+void load_gain_factors(const char *gain_root,
+                              TH1 *&gain_factors,
+                              TH1 *&crystal_factor,
+                              TFile *&gain_file_handle);
 
 #endif // COMMON_LED_H

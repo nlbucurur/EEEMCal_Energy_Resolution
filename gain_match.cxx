@@ -47,7 +47,6 @@
 #include <cmath>
 #include <algorithm>
 
-
 // ------------------------------------------------------------
 // Robust peak finder
 //   1) gaussian in mean±1.5*rms
@@ -346,6 +345,9 @@ void gain_match_one(const char *filename,
             const int crystal_id = it->second.first;
             const int sipm = it->second.second;
 
+            if (!use_selected_sipm(crystal_id, sipm))
+                continue;
+
             float sig = 0.0f;
             bool used_tot = false;
 
@@ -403,11 +405,15 @@ void gain_match_one(const char *filename,
 
         for (int sipm_i = 0; sipm_i < LED_SIPMS_PER_CRYSTAL; ++sipm_i)
         {
+            if (!use_selected_sipm(crystal_id, sipm_i))
+                continue;
             if (exclude_from_crystal_mean(crystal_id, sipm_i))
                 continue;
+
             const float pk = peak[crystal_id][sipm_i];
             if (pk <= 0)
                 continue;
+
             sum += pk;
             n++;
         }
@@ -649,7 +655,7 @@ void gain_scan(const char *data_dir = "data",
         {177, 1.313f},
         {178, 1.322f},
         {179, 1.331f},
-        {180, 1.34f}//,
+        {180, 1.34f} //,
         // {181, 1.349f},
         // {182, 1.358f},
         // {183, 1.367f}

@@ -35,6 +35,7 @@
 #include <TFitResult.h>
 #include <TFitResultPtr.h>
 #include <TError.h>
+#include <TSystem.h>
 
 // ===== Globals =====
 
@@ -42,11 +43,79 @@ int g_signal_method = 3; // 2, 3, 4, 5, 7 (7 = waveform crystal ball fit)
 int g_sipms_to_use = 16; // Number of SiPMs to use per crystal (= 16)
 uint32_t g_tot_min = 50; // Minimum ToT value to consider valid
 
+int g_selected_crystal_id = 12;
+
+long g_max_events = 1000000;
+
+bool g_do_cog_ellipse_cut = true;
+float g_cog_cx = 2.0f;
+float g_cog_cy = 2.0f;
+float g_cog_sx = 0.80f;
+float g_cog_sy = 0.80f;
+//========================================================//
+//==============       Change this        ================//
+//========================================================//
+std::set<int> g_selected_central_sipms = {15};   // choose 0..15
+
+
+// crystals to ignore (e.g., Tristan ignored crystal 9)
+// Edit this list to ignore additional crystals during the analysis.
+std::vector<int> g_skip_crystals = {9, 15};
+//========================================================//
+//==============       Change this        ================//
+//========================================================//
+
+bool is_skipped_crystal(int cr)
+{
+    return std::find(g_skip_crystals.begin(), g_skip_crystals.end(), cr) != g_skip_crystals.end();
+}
+
+
+bool use_selected_sipm(int crystal, int sipm)
+{
+    if (crystal != g_selected_crystal_id)
+        return true;
+
+    return g_selected_central_sipms.empty() ||
+           g_selected_central_sipms.count(sipm) > 0;
+}
+
+int first_selected_sipm_in_mapping(const std::map<int, std::vector<int>>& mapping,
+                                   int crystal,
+                                   int expected_sipms_per_crystal)
+{
+    auto chans = get_crystal_channels(mapping, crystal, expected_sipms_per_crystal);
+    for (int sipm = 0; sipm < expected_sipms_per_crystal; ++sipm)
+    {
+        if (!use_selected_sipm(crystal, sipm))
+            continue;
+        if (sipm < (int)chans.size() && chans[sipm] >= 0)
+            return sipm;
+    }
+    return -1;
+}
+
+int count_selected_sipms_in_mapping(const std::map<int, std::vector<int>>& mapping,
+                                    int crystal,
+                                    int expected_sipms_per_crystal)
+{
+    auto chans = get_crystal_channels(mapping, crystal, expected_sipms_per_crystal);
+    int n = 0;
+    for (int sipm = 0; sipm < expected_sipms_per_crystal; ++sipm)
+    {
+        if (!use_selected_sipm(crystal, sipm))
+        continue;
+        if (sipm < (int)chans.size() && chans[sipm] >= 0)
+            n++;
+    }
+    return n;
+}
+
 int extract_run_number(const char *filename)
 {
     if (!filename)
         return -1;
-
+        
     std::string s(filename);
     int run = -1;
     size_t pos = s.find("Run");
@@ -597,6 +666,49 @@ std::vector<int> get_active_channels_from_mapping(const std::map<int, std::vecto
         }
     }
     return std::vector<int>(unique.begin(), unique.end());
+}
+
+void mkdir_p(const char *dir)
+{
+    if (!dir)
+        return;
+    gSystem->mkdir(dir, true);
+}
+
+// Load gain factors produced by gain_match.cxx
+void load_gain_factors(const char *gain_root,
+                              TH1 *&gain_factors,
+                              TH1 *&crystal_factor,
+                              TFile *&gain_file_handle)
+{
+    gain_factors = nullptr;
+    crystal_factor = nullptr;
+    gain_file_handle = nullptr;
+
+    if (gain_root)
+    {
+        gain_file_handle = TFile::Open(gain_root, "READ");
+        if (gain_file_handle && !gain_file_handle->IsZombie())
+        {
+            gain_factors = (TH1 *)gain_file_handle->Get("gain_factors");
+            crystal_factor = (TH1 *)gain_file_handle->Get("crystal_factor");
+        }
+    }
+
+    // fallbacks
+    if (!gain_factors)
+    {
+        gain_factors = new TH1F("gain_factors_unity", "Gain Factors;crystal*16+sipm;Gain", LED_MAX_NUM_CRYSTALS * LED_SIPMS_PER_CRYSTAL, 0, LED_MAX_NUM_CRYSTALS * LED_SIPMS_PER_CRYSTAL);
+        for (int i = 1; i <= gain_factors->GetNbinsX(); ++i)
+            gain_factors->SetBinContent(i, 1.0);
+    }
+
+    if (!crystal_factor)
+    {
+        crystal_factor = new TH1F("crystal_factor_unity", "Crystal Factors;crystal;Gain", LED_MAX_NUM_CRYSTALS, 0, LED_MAX_NUM_CRYSTALS);
+        for (int i = 1; i <= crystal_factor->GetNbinsX(); ++i)
+            crystal_factor->SetBinContent(i, 1.0);
+    }
 }
 
 // float sigma_cut = 2;

@@ -24,7 +24,7 @@
 //   - By default, any event with ToT in a NON-central crystal is rejected (same as tot_calibration.cxx).
 //     This keeps the reconstruction simple and consistent.
 //   - Central-crystal ToT is handled via tot_calibration_values.root (pol2 / pol1). Mixed (ADC+ToT) in the
-//     central crystal is allowed; we scale the ToT-sum to 16 channels before conversion, then scale back.
+//     central crystal is allowed; we scale the ToT-sum to 16 channels if all the 16 channels are chosen before conversion, then scale back.
 //
 
 #include <map>
@@ -70,19 +70,24 @@
 #include <utility>
 #include <vector>
 
-static constexpr int SAMPLES_PER_CHANNEL = 20;
-static constexpr int SIPMS_PER_CRYSTAL = 16;
-static constexpr int MAX_NUM_CRYSTALS = 25;
-
 // -------------------- knobs --------------------
-static long g_max_events = 1000000;
 static bool g_use_tot_for_central = true;                 // use tot_calibration_values.root for central ToT
 static bool g_reject_noncentral_tot = true;               // reject events with ToT in non-central crystals
 static bool g_use_totcalib_resolution_for_totonly = true; // if central is ToT-only, take resolution from tot_calibration_values.root
 
+//========================================================//
+//==============       Change this        ================//
+//========================================================//
 static bool g_force_tot_override_for_voltage = true; // force ToT override for a specific LED voltage label
 // Force ToT override for specific LED labels (in volts)
-static std::vector<float> g_force_tot_override_voltages = {};
+static std::vector<float> g_force_tot_override_voltages = {1.295f, 1.304, 1.313f, 1.322f, 1.331f, 1.340f}; // example: {0.5f, 0.75f, 1.0f} (set to empty to disable)
+
+// With partial central ToT coverage, the flag controls whether extrapolate or not
+static bool g_scale_central_tot_to_16_sipms = true; // if true, scale ToT sum by (16 / n_used_channels) before applying ToT calibration. Has no effect if all 16 channels are used.
+//========================================================//
+//==============       Change this        ================//
+//========================================================//
+
 static float g_vlabel_eps = 5e-3f; // tolerance on voltage label (V)
 
 static bool force_tot_override(float Vlabel)
@@ -96,49 +101,7 @@ static bool force_tot_override(float Vlabel)
     return false;
 }
 
-// COG ellipse cut (same defaults as tot_calibration.cxx)
-static bool g_do_cog_ellipse_cut = true;
-static float g_cog_cx = 2.0f;
-static float g_cog_cy = 2.0f;
-static float g_cog_sx = 0.80f;
-static float g_cog_sy = 0.80f;
-
-// Ignore some crystals in sums/COG (e.g. 9 weird, 15 can be problematic)
-static std::vector<int> g_skip_crystals = {9};
-
-static inline bool is_skipped_crystal(int cr)
-{
-    return std::find(g_skip_crystals.begin(), g_skip_crystals.end(), cr) != g_skip_crystals.end();
-}
-
 // -------------------- helpers --------------------
-
-static void mkdir_p(const char *dir)
-{
-    if (!dir)
-        return;
-    gSystem->mkdir(dir, true);
-}
-
-static int extract_run_number(const char *filename)
-{
-    std::string s(filename);
-    int run = -1;
-    size_t pos = s.find("Run");
-    if (pos != std::string::npos)
-    {
-        pos += 3;
-        std::string digits;
-        while (pos < s.size() && std::isdigit((unsigned char)s[pos]))
-        {
-            digits += s[pos];
-            pos++;
-        }
-        if (!digits.empty())
-            run = std::stoi(digits);
-    }
-    return run;
-}
 
 // Fit a single-peak distribution robustly.
 // Returns: true on success, and fills mu/sigma and their errors.
@@ -178,11 +141,11 @@ static bool fit_peak_robust(TH1 *h, double &mu, double &sigma, double &emu, doub
     // double gmax = std::min(xMax, m + s);
     // if (gmax - gmin < 0.03 * (xMax - xMin))
     // {
-        mu = m;
-        sigma = s;
-        emu = rough.GetParError(1);
-        esigma = rough.GetParError(2);
-        return true;
+    mu = m;
+    sigma = s;
+    emu = rough.GetParError(1);
+    esigma = rough.GetParError(2);
+    return true;
     // }
 
     // TF1 g2("second_fit", "gaus", gmin, gmax);
@@ -233,16 +196,14 @@ static inline bool ellipse_cut(float x, float y)
 {
     if (!g_do_cog_ellipse_cut)
         return true;
-    const float dx = (x - g_cog_cx) / g_cog_sx;
-    const float dy = (y - g_cog_cy) / g_cog_sy;
-    return (dx * dx + dy * dy) <= 1.0f;
+    return point_in_ellipse(x, y, g_cog_cx, g_cog_cy, g_cog_sx, g_cog_sy);
 }
 
 // COG from 5x5 crystal array, returns whether event passes ellipse cut.
-static bool calculate_cog(TH2 *distribution, const std::array<float, MAX_NUM_CRYSTALS> &values)
+static bool calculate_cog(TH2 *distribution, const std::array<float, LED_MAX_NUM_CRYSTALS> &values)
 {
     float total_signal = 0.0f;
-    for (int i = 0; i < MAX_NUM_CRYSTALS; ++i)
+    for (int i = 0; i < LED_MAX_NUM_CRYSTALS; ++i)
     {
         if (is_skipped_crystal(i))
             continue;
@@ -257,12 +218,14 @@ static bool calculate_cog(TH2 *distribution, const std::array<float, MAX_NUM_CRY
     float total_weight = 0.0f;
     const float w = 4.0f;
 
-    for (int i = 0; i < MAX_NUM_CRYSTALS; ++i)
+    for (int i = 0; i < LED_MAX_NUM_CRYSTALS; ++i)
     {
         if (is_skipped_crystal(i))
             continue;
-        const int x = i % 5;
-        const int y = i / 5;
+        float x, y;
+        build_xy_for_crystal(i, x, y);
+        if (x < -100.0f || y < -100.0f)
+            continue;
         const float sig = values[i];
         if (sig <= 0)
             continue;
@@ -520,46 +483,12 @@ static void tot_stats_to_v_equiv(const TotCalibParams &p,
         sigma_v = 0.0;
     }
 }
-static void load_gain_factors(const char *gain_root,
-                              TH1 *&gain_factors,
-                              TH1 *&crystal_factor,
-                              TFile *&gain_file_handle)
-{
-    gain_factors = nullptr;
-    crystal_factor = nullptr;
-    gain_file_handle = nullptr;
-
-    if (gain_root)
-    {
-        gain_file_handle = TFile::Open(gain_root, "READ");
-        if (gain_file_handle && !gain_file_handle->IsZombie())
-        {
-            gain_factors = (TH1 *)gain_file_handle->Get("gain_factors");
-            crystal_factor = (TH1 *)gain_file_handle->Get("crystal_factor");
-        }
-    }
-
-    // fallbacks
-    if (!gain_factors)
-    {
-        gain_factors = new TH1F("gain_factors_unity", "Gain Factors;crystal*16+sipm;Gain", MAX_NUM_CRYSTALS * SIPMS_PER_CRYSTAL, 0, MAX_NUM_CRYSTALS * SIPMS_PER_CRYSTAL);
-        for (int i = 1; i <= gain_factors->GetNbinsX(); ++i)
-            gain_factors->SetBinContent(i, 1.0);
-    }
-
-    if (!crystal_factor)
-    {
-        crystal_factor = new TH1F("crystal_factor_unity", "Crystal Factors;crystal;Gain", MAX_NUM_CRYSTALS, 0, MAX_NUM_CRYSTALS);
-        for (int i = 1; i <= crystal_factor->GetNbinsX(); ++i)
-            crystal_factor->SetBinContent(i, 1.0);
-    }
-}
 
 static inline float get_channel_gain(TH1 *gain_factors, int crystal, int sipm)
 {
     if (!gain_factors)
         return 1.0f;
-    const int idx = crystal * SIPMS_PER_CRYSTAL + sipm;
+    const int idx = crystal * LED_SIPMS_PER_CRYSTAL + sipm;
     if (idx < 0)
         return 1.0f;
     return (float)gain_factors->GetBinContent(idx + 1);
@@ -607,7 +536,7 @@ static std::vector<RunPoint> default_led_runs()
         {177, 1.313f},
         {178, 1.322f},
         {179, 1.331f},
-        {180, 1.34f}//,
+        {180, 1.34f} //,
         // {181, 1.349f},
         // {182, 1.358f},
         // {183, 1.367f}
@@ -636,7 +565,7 @@ void energy_resolution_led_scan(const char *data_dir = "data",
     mkdir_p(outdir);
 
     // ---- mapping
-    auto mapping = read_mapping_csv(mapping_csv, SIPMS_PER_CRYSTAL);
+    auto mapping = read_mapping_csv(mapping_csv, LED_SIPMS_PER_CRYSTAL);
     if (mapping.empty())
     {
         std::cerr << "Error: mapping empty. Check mapping CSV: " << mapping_csv << "\n";
@@ -644,23 +573,14 @@ void energy_resolution_led_scan(const char *data_dir = "data",
     }
 
     // reverse[channel] = {crystal,sipm}
-    std::unordered_map<int, std::pair<int, int>> reverse;
-    reverse.reserve(mapping.size() * SIPMS_PER_CRYSTAL);
-    for (const auto &kv : mapping)
-    {
-        const int cr = kv.first;
-        auto chans = get_crystal_channels(mapping, cr, SIPMS_PER_CRYSTAL);
-        for (int sipm = 0; sipm < SIPMS_PER_CRYSTAL; ++sipm)
-        {
-            const int ch = chans[sipm];
-            if (ch < 0)
-                continue;
-            reverse[ch] = {cr, sipm};
-        }
-    }
+    std::unordered_map<int, std::pair<int, int>> reverse =
+        build_reverse_channel_map(mapping, LED_SIPMS_PER_CRYSTAL);
 
     // be generous with max_channels in case mapping uses global channels beyond 0-127
-    auto active_channels = get_active_channels_from_mapping(mapping, SIPMS_PER_CRYSTAL, MAX_NUM_CRYSTALS, 576);
+    auto active_channels = get_active_channels_from_mapping(mapping, LED_SIPMS_PER_CRYSTAL, LED_MAX_NUM_CRYSTALS, 576);
+
+    const int n_expected_central_tot =
+        count_selected_sipms_in_mapping(mapping, central_crystal, LED_SIPMS_PER_CRYSTAL);
 
     // ---- ToT calibration
     TotCalibParams totP = load_tot_calibration(tot_calib_root);
@@ -857,7 +777,7 @@ void energy_resolution_led_scan(const char *data_dir = "data",
         }
 
         const int n_adc = leaf_adc->GetLen();
-        if ((n_adc % SAMPLES_PER_CHANNEL) != 0)
+        if ((n_adc % LED_SAMPLES_PER_CHANNEL) != 0)
         {
             std::cerr << "Warning: unexpected adc length=" << n_adc << " in " << infile << " (skipping)\n";
             f->Close();
@@ -877,7 +797,7 @@ void energy_resolution_led_scan(const char *data_dir = "data",
             continue;
         }
 
-        const int n_channels = n_adc / SAMPLES_PER_CHANNEL;
+        const int n_channels = n_adc / LED_SAMPLES_PER_CHANNEL;
 
         // tot branch is optional
         bool have_tot = false;
@@ -934,7 +854,7 @@ void energy_resolution_led_scan(const char *data_dir = "data",
         {
             t->GetEntry(ev);
 
-            std::array<float, MAX_NUM_CRYSTALS> adc_crystal;
+            std::array<float, LED_MAX_NUM_CRYSTALS> adc_crystal;
             adc_crystal.fill(0.0f);
 
             // central ToT bookkeeping
@@ -954,15 +874,17 @@ void energy_resolution_led_scan(const char *data_dir = "data",
 
                 const int cr = it->second.first;
                 const int sipm = it->second.second;
-                if (cr < 0 || cr >= MAX_NUM_CRYSTALS || sipm < 0 || sipm >= SIPMS_PER_CRYSTAL)
+                if (cr < 0 || cr >= LED_MAX_NUM_CRYSTALS || sipm < 0 || sipm >= LED_SIPMS_PER_CRYSTAL)
                     continue;
                 if (!mapping.count(cr))
                     continue;
                 if (is_skipped_crystal(cr))
                     continue;
+                if (!use_selected_sipm(cr, sipm))
+                    continue;
 
-                uint32_t *adc_ptr = &adc_buf[(size_t)ch * SAMPLES_PER_CHANNEL];
-                uint32_t *tot_ptr = (have_tot ? &tot_buf[(size_t)ch * SAMPLES_PER_CHANNEL] : nullptr);
+                uint32_t *adc_ptr = &adc_buf[(size_t)ch * LED_SAMPLES_PER_CHANNEL];
+                uint32_t *tot_ptr = (have_tot ? &tot_buf[(size_t)ch * LED_SAMPLES_PER_CHANNEL] : nullptr);
 
                 const float gch = get_channel_gain(gain_factors, cr, sipm);
 
@@ -1004,13 +926,15 @@ void energy_resolution_led_scan(const char *data_dir = "data",
                 continue;
             }
 
-            const bool evt_central_tot_only = (g_use_tot_for_central && (central_tot_used == SIPMS_PER_CRYSTAL) && (adc_crystal[central_crystal] == 0.0f));
+            const bool evt_central_tot_only = (g_use_tot_for_central &&
+                                               (central_tot_used == n_expected_central_tot) &&
+                                               (adc_crystal[central_crystal] == 0.0f));
 
             // apply per-crystal factor and convert to V-equivalent
-            std::array<float, MAX_NUM_CRYSTALS> v_crystal;
+            std::array<float, LED_MAX_NUM_CRYSTALS> v_crystal;
             v_crystal.fill(0.0f);
 
-            for (int cr = 0; cr < MAX_NUM_CRYSTALS; ++cr)
+            for (int cr = 0; cr < LED_MAX_NUM_CRYSTALS; ++cr)
             {
                 if (!mapping.count(cr))
                     continue;
@@ -1027,13 +951,22 @@ void energy_resolution_led_scan(const char *data_dir = "data",
             float v_center = v_crystal[central_crystal];
             if (g_use_tot_for_central && totP.ok && central_tot_used > 0)
             {
-                const float frac = (float)central_tot_used / (float)SIPMS_PER_CRYSTAL;
-                float tot_norm = central_tot_sum;
-                if (frac > 0)
-                    tot_norm = central_tot_sum / frac; // scale to 16 channels
+                float v_tot = 0.0f;
+                
+                if (g_scale_central_tot_to_16_sipms && n_expected_central_tot == LED_SIPMS_PER_CRYSTAL)
+                {
+                    const float frac = (float)central_tot_used / (float)LED_SIPMS_PER_CRYSTAL;
+                    float tot_norm = central_tot_sum;
+                    if (frac > 0)
+                        tot_norm = central_tot_sum / frac; // scale to 16 channels
 
-                float v_norm = tot_to_voltage_equiv(totP, tot_norm);
-                float v_tot = v_norm * frac; // scale back
+                    float v_norm = tot_to_voltage_equiv(totP, tot_norm);
+                    v_tot = v_norm * frac; // scale back
+                }
+                else
+                {
+                    v_tot = tot_to_voltage_equiv(totP, central_tot_sum);
+                }
 
                 v_center += v_tot;
                 v_crystal[central_crystal] = v_center;
@@ -1048,7 +981,7 @@ void energy_resolution_led_scan(const char *data_dir = "data",
 
             // build sums
             float v_total = 0.0f;
-            for (int cr = 0; cr < MAX_NUM_CRYSTALS; ++cr)
+            for (int cr = 0; cr < LED_MAX_NUM_CRYSTALS; ++cr)
             {
                 if (!mapping.count(cr))
                     continue;
@@ -1061,7 +994,7 @@ void energy_resolution_led_scan(const char *data_dir = "data",
             for (int k = 0; k < 9; ++k)
             {
                 const int cr = idx9[k];
-                if (cr < 0 || cr >= MAX_NUM_CRYSTALS)
+                if (cr < 0 || cr >= LED_MAX_NUM_CRYSTALS)
                     continue;
                 if (!mapping.count(cr))
                     continue;

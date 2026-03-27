@@ -31,11 +31,11 @@
 #include "common_led.h"
 
 void draw_waveform_reversed(int run_number,
-                   float voltage,
-                   const char *in_dir = "data",
-                   const char *mapping_csv = "eeemcal_desy_dec2025_mapping_v2.csv",
-                   const char *out_dir = "outputs",
-                   int sipms_to_use = g_sipms_to_use)
+                            float voltage,
+                            const char *in_dir = "data",
+                            const char *mapping_csv = "eeemcal_desy_dec2025_mapping_v2.csv",
+                            const char *out_dir = "outputs",
+                            int sipms_to_use = g_sipms_to_use)
 {
     const int samples_per_channel = LED_SAMPLES_PER_CHANNEL;
 
@@ -142,8 +142,8 @@ void draw_waveform_reversed(int run_number,
 
             // Keep your original binning/range
             h2[crystal_id][sipm] = new TH2D(hname.c_str(), htitle.c_str(),
-                                           samples_per_channel, 0, samples_per_channel,
-                                           1024, 0, 1024);
+                                            samples_per_channel, 0, samples_per_channel,
+                                            1024, 0, 1024);
         }
     }
 
@@ -158,21 +158,29 @@ void draw_waveform_reversed(int run_number,
 
         for (int ch : active_channels)
         {
-            if (ch < 0 || ch >= nch_from_file) continue;
+            if (ch < 0 || ch >= nch_from_file)
+                continue;
 
             auto it = reverse.find(ch);
-            if (it == reverse.end()) continue;
+            if (it == reverse.end())
+                continue;
 
             const int crystal_id = it->second.first;
-            const int sipm       = it->second.second;
+            const int sipm = it->second.second;
 
             // Safety: crystal_id may exist but vector may not (should not happen)
             auto itC = h2.find(crystal_id);
-            if (itC == h2.end()) continue;
-            if (sipm < 0 || sipm >= (int)itC->second.size()) continue;
+            if (itC == h2.end())
+                continue;
+            if (sipm < 0 || sipm >= (int)itC->second.size())
+                continue;
 
             TH2D *hist = itC->second[(size_t)sipm];
-            if (!hist) continue;
+            if (!hist)
+                continue;
+
+            if (!use_selected_sipm(crystal_id, sipm))
+                continue;
 
             for (int t = 0; t < samples_per_channel; ++t)
                 hist->Fill(t, adc_at(ch, t));
@@ -206,7 +214,8 @@ void draw_waveform_reversed(int run_number,
                 break;
             }
         }
-        if (!any_valid) continue;
+        if (!any_valid)
+            continue;
 
         canvas->Clear("D");
         canvas->Divide(4, 4);
@@ -222,7 +231,8 @@ void draw_waveform_reversed(int run_number,
             if (itC != h2.end() && sipm >= 0 && sipm < (int)itC->second.size())
                 hist = itC->second[(size_t)sipm];
 
-            if (hist) hist->Draw("COLZ");
+            if (hist)
+                hist->Draw("COLZ");
         }
 
         canvas->SaveAs(output_file.c_str());
@@ -246,16 +256,7 @@ void draw_waveform_reversed(int run_number,
 void led_scan()
 {
     std::vector<std::pair<int, float>> runs = {
-        {23, 0.0f}, {26, 1.2f}, {30, 1.22f}, {33, 1.24f}, {36, 1.25f},
-        {39, 1.26f}, {42, 1.27f}, {45, 1.28f}, {48, 1.29f}, {51, 1.30f},
-        {54, 1.32f}, {57, 1.33f}, {60, 1.34f}, {63, 1.36f}, {66, 1.37f},
-        {69, 1.38f}, {72, 1.40f}, {75, 1.42f}, {78, 1.44f}, {81, 1.46f},
-        {84, 1.48f}, {87, 1.50f}, {90, 1.52f}, {93, 1.54f}, {96, 1.56f},
-        {99, 1.58f}, {102, 1.60f}, {105, 1.62f}, {108, 1.64f}, {111, 1.66f},
-        {114, 1.68f}, {117, 1.70f}, {120, 1.72f}, {123, 1.74f}, {126, 1.76f},
-        {129, 1.78f}, {132, 1.80f}, {135, 1.82f}, {138, 1.84f}, {141, 1.86f},
-        {144, 1.88f}
-    };
+        {23, 0.0f}, {26, 1.2f}, {30, 1.22f}, {33, 1.24f}, {36, 1.25f}, {39, 1.26f}, {42, 1.27f}, {45, 1.28f}, {48, 1.29f}, {51, 1.30f}, {54, 1.32f}, {57, 1.33f}, {60, 1.34f}, {63, 1.36f}, {66, 1.37f}, {69, 1.38f}, {72, 1.40f}, {75, 1.42f}, {78, 1.44f}, {81, 1.46f}, {84, 1.48f}, {87, 1.50f}, {90, 1.52f}, {93, 1.54f}, {96, 1.56f}, {99, 1.58f}, {102, 1.60f}, {105, 1.62f}, {108, 1.64f}, {111, 1.66f}, {114, 1.68f}, {117, 1.70f}, {120, 1.72f}, {123, 1.74f}, {126, 1.76f}, {129, 1.78f}, {132, 1.80f}, {135, 1.82f}, {138, 1.84f}, {141, 1.86f}, {144, 1.88f}};
 
     for (auto &rv : runs)
         draw_waveform_reversed(rv.first, rv.second, "data", "eeemcal_desy_dec2025_mapping_v2.csv", "outputs", g_sipms_to_use);
