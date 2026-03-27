@@ -1,6 +1,26 @@
-# eeemcal_desy_dec2025
+# LED analysis for EEEMCal protoype - IJCLab
 
-## Step-by-step procedure to run
+## Recommender order in a ROOT session
+
+```
+    root -l -b
+    .L common_led.cxx+
+    .L gain_match.cxx+
+    gain_scan("data", "eeemcal_desy_dec2025_mapping_v2.csv", "outputs", true)
+
+    .L adc_calibration.cxx+
+    adc_calib_scan("data", "eeemcal_desy_dec2025_mapping_v2.csv", true)
+
+    .L tot_calibration.cxx+
+    tot_calib_scan("data", "eeemcal_desy_dec2025_mapping_v2.csv", "outputs", "outputs/gain_match_1.259V.root", "outputs/adc_to_ref_calibration_1.259V.root", "outputs/tot_widths.root", 12)
+
+    .L energy_resolution.cxx+
+    energy_resolution_led_scan("data", "eeemcal_desy_dec2025_mapping_v2.csv", "outputs", "outputs/adc_to_ref_calibration_1.259V.root", "outputs/tot_calibration_values.root", 12)
+
+    .q
+```
+
+## Step-by-step detailed procedure to run
 
 First, set your subset in `common_led.cxx`, for example:
 
@@ -118,22 +138,3 @@ This produces the ToT calibration values that `energy_resolution.cxx` uses.
 
 This is the last stage in the chain and it uses the gain files, ADC calibration, and ToT calibration together.
 
-## Recommender order in a ROOT session
-
-```
-    root -l -b
-    .L common_led.cxx+
-    .L gain_match.cxx+
-    gain_scan("data", "eeemcal_desy_dec2025_mapping_v2.csv", "outputs", true)
-
-    .L adc_calibration.cxx+
-    adc_calib_scan("data", "eeemcal_desy_dec2025_mapping_v2.csv", true)
-
-    .L tot_calibration.cxx+
-    tot_calib_scan("data", "eeemcal_desy_dec2025_mapping_v2.csv", "outputs", "outputs/gain_match_1.259V.root", "outputs/adc_to_ref_calibration_1.259V.root", "outputs/tot_widths.root", 12)
-
-    .L energy_resolution.cxx+
-    energy_resolution_led_scan("data", "eeemcal_desy_dec2025_mapping_v2.csv", "outputs", "outputs/adc_to_ref_calibration_1.259V.root", "outputs/tot_calibration_values.root", 12)
-
-    .q
-```
