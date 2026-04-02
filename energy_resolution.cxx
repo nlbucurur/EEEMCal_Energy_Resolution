@@ -80,7 +80,7 @@ static bool g_use_totcalib_resolution_for_totonly = true; // if central is ToT-o
 //========================================================//
 static bool g_force_tot_override_for_voltage = true; // force ToT override for a specific LED voltage label
 // Force ToT override for specific LED labels (in volts)
-static std::vector<float> g_force_tot_override_voltages = {1.295f, 1.304, 1.313f, 1.322f, 1.331f, 1.340f}; // example: {0.5f, 0.75f, 1.0f} (set to empty to disable)
+static std::vector<float> g_force_tot_override_voltages = {1.295f, 1.304f, 1.313f, 1.322f, 1.331f, 1.340f}; // example: {0.5f, 0.75f, 1.0f} (set to empty to disable)
 
 // With partial central ToT coverage, the flag controls whether extrapolate or not
 static bool g_scale_central_tot_to_16_sipms = true; // if true, scale ToT sum by (16 / n_used_channels) before applying ToT calibration. Has no effect if all 16 channels are used.

@@ -485,7 +485,7 @@ void adc_calibration_one(const char *filename,
     // ---------------- Histograms (global) ----------------
     TH1 *central_crystal_energy = new TH1F("central_crystal_energy",
                                            Form("Central Crystal Energy (%.3f V);Energy (ADC);Events", voltage),
-                                           500, 0, 6000);
+                                           500, 0, 20000);
 
     TH1 *central_nine_energy = new TH1F("central_nine_energy",
                                         Form("Central 3x3 Energy (%.3f V);Energy (ADC);Events", voltage),
