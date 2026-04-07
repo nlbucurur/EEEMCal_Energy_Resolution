@@ -2,7 +2,8 @@
 // root -l -b
 // .L common_led.cxx+
 // .L sipm_fraction_scan.cxx+
-// sipm_fraction_scan("data","eeemcal_desy_dec2025_mapping_v2.csv","outputs",12,1000000,true,true)
+// sipm_fraction_scan("data","eeemcal_desy_dec2025_mapping_v2.csv","outputs",12,1000000,false,true) // no common mode
+// sipm_fraction_scan("data","eeemcal_desy_dec2025_mapping_v2.csv","outputs",12,1000000,true,true) // yes common mode
 
 #include "common_led.h"
 
@@ -303,7 +304,7 @@ void sipm_fraction_and_resolution_one(const char *filename,
     {
         h_share[sipm] = new TH1F(Form("h_share_sipm_%02d", sipm),
                                  Form("SiPM %02d fraction of full 16-SiPM sum;fraction;Events", sipm),
-                                 250, 0, 1.05);
+                                 50, 0, 0.2);
         h_signal_adc[sipm] = new TH1F(Form("h_signal_adc_sipm_%02d", sipm),
                                       Form("SiPM %02d signal;ADC;Events", sipm),
                                       500, 0, 5000);
@@ -438,7 +439,7 @@ void sipm_fraction_and_resolution_one(const char *filename,
                                    600, 0, 40000);
         h_subset_veq[n] = new TH1F(Form("h_subset_veq_top%d", n + 1),
                                    Form("Top-%d cumulative subset;V-equiv;Events", n + 1),
-                                   600, 0, 5.0);
+                                   600, 0, 2.0);
         h_subset_frac[n] = new TH1F(Form("h_subset_frac_top%d", n + 1),
                                     Form("Top-%d cumulative fraction;fraction;Events", n + 1),
                                     250, 0, 1.05);
@@ -627,7 +628,7 @@ void sipm_fraction_and_resolution_one(const char *filename,
                 R2_res_mu = 1.0 - ss_res / ss_tot;
 
             // if (f_res_mu->GetNDF() > 0)
-                chi2ndf_res_mu = f_res_mu->GetChisquare() / f_res_mu->GetNDF();
+            chi2ndf_res_mu = f_res_mu->GetChisquare() / f_res_mu->GetNDF();
         }
     }
 
@@ -652,6 +653,18 @@ void sipm_fraction_and_resolution_one(const char *filename,
     }
 
     const int run = extract_run_number(filename);
+
+    const TString run_voltage_label = Form("Run %03d, %.3f V", run, voltage);
+
+    auto draw_run_voltage = [&](double x = 0.4, double y = 0.92, double size = 0.032)
+    {
+        TLatex t;
+        t.SetNDC();
+        t.SetTextFont(42);
+        t.SetTextSize(size);
+        t.DrawLatex(x, y, run_voltage_label);
+    };
+
     const std::string base = Form("%s/sipm_fraction_run%03d_%.3fV", outdir, run, voltage);
     const std::string pdf = base + ".pdf";
     const std::string rootname = base + ".root";
@@ -686,6 +699,7 @@ void sipm_fraction_and_resolution_one(const char *filename,
         lat.DrawLatex(0.5, 0.84, Form("fit mean = %.4f", mu_share_fit[sipm]));
         lat.DrawLatex(0.5, 0.77, Form("fit #sigma = %.4f", sigma_share_fit[sipm]));
         lat.DrawLatex(0.5, 0.70, Form("rank = %d", (int)(std::find(order.begin(), order.end(), sipm) - order.begin()) + 1));
+        draw_run_voltage();
     }
     c->SaveAs(pdf.c_str());
 
@@ -704,6 +718,7 @@ void sipm_fraction_and_resolution_one(const char *filename,
     leg->SetBorderSize(0);
     leg->SetFillStyle(0);
     leg->Draw();
+    draw_run_voltage();
     c->SaveAs(pdf.c_str());
 
     c->Clear();
@@ -712,12 +727,14 @@ void sipm_fraction_and_resolution_one(const char *filename,
     g_share_rank->Draw("AP");
     f_line->Draw("same");
     leg->Draw();
+    draw_run_voltage();
     c->SaveAs(pdf.c_str());
 
     c->Clear();
     g_cumshare->SetMarkerStyle(20);
     c->SetGrid();
     g_cumshare->Draw("AP");
+    draw_run_voltage();
     c->SaveAs(pdf.c_str());
 
     c->Clear();
@@ -736,6 +753,7 @@ void sipm_fraction_and_resolution_one(const char *filename,
         lat.DrawLatex(0.5, 0.66, Form("R^{2} = %.4f", R2_res_mu));
         lat.DrawLatex(0.5, 0.60, Form("#chi^{2}/NDF = %.3f", chi2ndf_res_mu));
         lat.SetTextColor(kBlack);
+        draw_run_voltage();
     }
     c->SaveAs(pdf.c_str());
 
@@ -743,12 +761,14 @@ void sipm_fraction_and_resolution_one(const char *filename,
     g_res_sqrt_mu->SetMarkerStyle(20);
     g_res_sqrt_mu->Draw("AP");
     // lat.DrawLatex(0.18, 0.84, "If this is roughly flat, the behavior is close to pure statistics");
+    draw_run_voltage();
     c->SaveAs(pdf.c_str());
 
     c->Clear();
     g_mu_n->SetMarkerStyle(20);
     c->SetGrid();
     g_mu_n->Draw("AP");
+    draw_run_voltage();
     c->SaveAs(pdf.c_str());
 
     c->Clear();
@@ -765,6 +785,7 @@ void sipm_fraction_and_resolution_one(const char *filename,
         lat.DrawLatex(0.5, 0.78, Form("A = %.4g #pm %.2g", f_res_mu->GetParameter(0), f_res_mu->GetParError(0)));
         lat.DrawLatex(0.5, 0.72, Form("B = %.4g #pm %.2g", f_res_mu->GetParameter(1), f_res_mu->GetParError(1)));
         lat.SetTextColor(kBlack);
+        draw_run_voltage();
     }
     c->SaveAs(pdf.c_str());
 
@@ -784,6 +805,7 @@ void sipm_fraction_and_resolution_one(const char *filename,
             lat.DrawLatex(0.5, 0.63, Form("#sigma = %.3f", sigma));
             lat.DrawLatex(0.5, 0.56, Form("res = %.2f%%", 100.0 * sigma / mu));
             lat.SetTextColor(kBlack);
+            draw_run_voltage();
         }
 
         lat.DrawLatex(0.5, 0.84, Form("N = %d", n + 1));
@@ -794,6 +816,7 @@ void sipm_fraction_and_resolution_one(const char *filename,
     c->Clear();
     TH1 *hfull = (adc_per_refunit > 0.0f) ? (TH1 *)h_full_veq : (TH1 *)h_full_adc;
     hfull->Draw("hist");
+    draw_run_voltage();
     c->SetGrid();
 
     double mu = 0.0, sigma = 0.0, emu = 0.0, esigma = 0.0;
@@ -812,6 +835,7 @@ void sipm_fraction_and_resolution_one(const char *filename,
     lat.DrawLatex(0.4, 0.69, Form("Skipped ToT %lld", skipped_tot));
     lat.DrawLatex(0.4, 0.64, Form("Skipped zero-sum %lld", skipped_zero));
     lat.DrawLatex(0.4, 0.59, Form("Ranking %s", join_order(order).c_str()));
+    draw_run_voltage();
     c->SaveAs(pdf.c_str());
 
     c->SaveAs((pdf + "]").c_str());
