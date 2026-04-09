@@ -16,10 +16,10 @@
 // root -l -b
 // .L common_led.cxx+
 // .L adc_calibration_rf_cc.cxx+
-// adc_calib_rf_cc_scan("data","eeemcal_desy_dec2025_mapping_v2.csv","outputs_rf_cc","outputs_rf_cc",true,true,false);
+// adc_calib_rf_cc_scan("data","eeemcal_desy_dec2025_mapping_v2.csv","outputs_rf_cc","outputs_rf_cc",true,false,false);
 //
 // Run examples:
-// 
+//
 // root -l -b
 // .L common_led.cxx+
 // .L adc_calibration_rf_cc.cxx+
@@ -28,7 +28,7 @@
 //                      "outputs_rf_cc",
 //                      "outputs",
 //                      true,   // use_hybrid_tot
-//                      true,   // use_common_mode
+//                      false,   // use_common_mode
 //                      false); // false = use fitted sigma in summary, true = use RMS
 //
 
@@ -85,6 +85,85 @@ static inline double photon_energy_eV(double wavelength_nm)
 }
 
 // ---------------------- small helpers ----------------------
+
+static void autoset_xrange_1d(TH1 *h, double frac_of_max = 0.01, int pad_bins = 2)
+{
+    if (!h || h->GetEntries() <= 0)
+        return;
+
+    const int nb = h->GetNbinsX();
+    const double thr = std::max(1.0, frac_of_max * h->GetMaximum());
+
+    int first = -1;
+    int last  = -1;
+
+    for (int b = 1; b <= nb; ++b)
+    {
+        if (h->GetBinContent(b) > thr)
+        {
+            first = b;
+            break;
+        }
+    }
+
+    for (int b = nb; b >= 1; --b)
+    {
+        if (h->GetBinContent(b) > thr)
+        {
+            last = b;
+            break;
+        }
+    }
+
+    if (first < 0 || last < 0 || first > last)
+        return;
+
+    first = std::max(1, first - pad_bins);
+    last  = std::min(nb, last + pad_bins);
+
+    const double xmin = h->GetXaxis()->GetBinLowEdge(first);
+    const double xmax = h->GetXaxis()->GetBinUpEdge(last);
+    h->GetXaxis()->SetRangeUser(xmin, xmax);
+}
+
+static void autoset_xy_2d(TH2 *h, double frac_of_max = 0.01, int pad_bins = 1)
+{
+    if (!h || h->GetEntries() <= 0)
+        return;
+
+    const int nx = h->GetNbinsX();
+    const int ny = h->GetNbinsY();
+    const double thr = std::max(1.0, frac_of_max * h->GetMaximum());
+
+    int firstx = -1, lastx = -1, firsty = -1, lasty = -1;
+
+    for (int bx = 1; bx <= nx; ++bx)
+    {
+        for (int by = 1; by <= ny; ++by)
+        {
+            if (h->GetBinContent(bx, by) > thr)
+            {
+                if (firstx < 0 || bx < firstx) firstx = bx;
+                if (lastx  < 0 || bx > lastx ) lastx  = bx;
+                if (firsty < 0 || by < firsty) firsty = by;
+                if (lasty  < 0 || by > lasty ) lasty  = by;
+            }
+        }
+    }
+
+    if (firstx < 0 || lastx < 0 || firsty < 0 || lasty < 0)
+        return;
+
+    firstx = std::max(1, firstx - pad_bins);
+    lastx  = std::min(nx, lastx + pad_bins);
+    firsty = std::max(1, firsty - pad_bins);
+    lasty  = std::min(ny, lasty + pad_bins);
+
+    h->GetXaxis()->SetRangeUser(h->GetXaxis()->GetBinLowEdge(firstx),
+                                h->GetXaxis()->GetBinUpEdge(lastx));
+    h->GetYaxis()->SetRangeUser(h->GetYaxis()->GetBinLowEdge(firsty),
+                                h->GetYaxis()->GetBinUpEdge(lasty));
+}
 
 static int32_t get_toa_first_nonzero(uint32_t *toa_values)
 {
@@ -527,17 +606,17 @@ void adc_calibration_rf_cc_one(const char *filename,
     }
 
     // ToA correlations (central crystal only)
-    std::vector<std::vector<TH2 *>> toa_correlations(LED_SIPMS_PER_CRYSTAL);
-    for (int i = 0; i < LED_SIPMS_PER_CRYSTAL; i++)
-    {
-        toa_correlations[i].reserve(LED_SIPMS_PER_CRYSTAL);
-        for (int j = 0; j < LED_SIPMS_PER_CRYSTAL; j++)
-        {
-            toa_correlations[i].push_back(new TH2F(Form("toa_correlation_sipm_%02d_sipm_%02d", i, j),
-                                                   Form("Central crystal: SiPM %02d vs %02d ToA;SiPM %02d ToA;SiPM %02d ToA", i, j, i, j),
-                                                   1024, 0, 1024, 1024, 0, 1024));
-        }
-    }
+    // std::vector<std::vector<TH2 *>> toa_correlations(LED_SIPMS_PER_CRYSTAL);
+    // for (int i = 0; i < LED_SIPMS_PER_CRYSTAL; i++)
+    // {
+    //     toa_correlations[i].reserve(LED_SIPMS_PER_CRYSTAL);
+    //     for (int j = 0; j < LED_SIPMS_PER_CRYSTAL; j++)
+    //     {
+    //         toa_correlations[i].push_back(new TH2F(Form("toa_correlation_sipm_%02d_sipm_%02d", i, j),
+    //                                                Form("Central crystal: SiPM %02d vs %02d ToA;SiPM %02d ToA;SiPM %02d ToA", i, j, i, j),
+    //                                                1024, 0, 1024, 1024, 0, 1024));
+    //     }
+    // }
 
     // ---------------- per-crystal/per-sipm histograms ----------------
     // Allocate for 25 crystals, but only fill when that crystal exists in mapping.
@@ -802,20 +881,20 @@ void adc_calibration_rf_cc_one(const char *filename,
 
                     // correlations with other central SiPMs
                     auto chans = get_crystal_channels(mapping, central_crystal_id, LED_SIPMS_PER_CRYSTAL);
-                    for (int other = 0; other < LED_SIPMS_PER_CRYSTAL; ++other)
-                    {
-                        if (!use_selected_sipm(central_crystal_id, other))
-                            continue;
-                        if (other == sipm)
-                            continue;
-                        int ch_other = chans[other];
-                        if (ch_other < 0 || ch_other >= n_channels)
-                            continue;
-                        int32_t toa_other = get_toa_first_nonzero(toa_ptr(ch_other));
-                        if (toa_other < 0)
-                            continue;
-                        toa_correlations[sipm][other]->Fill(toa_val, toa_other);
-                    }
+                    // for (int other = 0; other < LED_SIPMS_PER_CRYSTAL; ++other)
+                    // {
+                    //     if (!use_selected_sipm(central_crystal_id, other))
+                    //         continue;
+                    //     if (other == sipm)
+                    //         continue;
+                    //     int ch_other = chans[other];
+                    //     if (ch_other < 0 || ch_other >= n_channels)
+                    //         continue;
+                    //     int32_t toa_other = get_toa_first_nonzero(toa_ptr(ch_other));
+                    //     if (toa_other < 0)
+                    //         continue;
+                    //     toa_correlations[sipm][other]->Fill(toa_val, toa_other);
+                    // }
                 }
             }
         } // end channel loop
@@ -835,7 +914,7 @@ void adc_calibration_rf_cc_one(const char *filename,
 
         // COG selection
         bool keep = calculate_cog(cog_distribution, signals, DO_COG_CUT, COG_CX, COG_CY, COG_SX, COG_SY);
-        keep &= (!is_tot); // same as your old keep &= (!is_tot_event)
+        // keep &= (!is_tot); // same as your old keep &= (!is_tot_event)
         if (!keep)
             continue;
 
@@ -956,12 +1035,14 @@ void adc_calibration_rf_cc_one(const char *filename,
         //     fmin = std::max(xMin, mean0 - 0.5 * (xMax - xMin));
         //     fmax = std::min(xMax, mean0 + 0.5 * (xMax - xMin));
         // }
-        const double mean0 = central_crystal_energy->GetBinCenter(central_crystal_energy->GetMean()); // central_crystal_energy->GetMaximumBin()
-        const double rms0 = std::max(0.0, central_crystal_energy->GetRMS());
+        // const double mean0 = central_crystal_energy->GetBinCenter(central_crystal_energy->GetMean()); // central_crystal_energy->GetMaximumBin()
+        const double mean0 = central_crystal_energy->GetMean();
+        const double rms0 = std::max(1.0, (double)central_crystal_energy->GetRMS());
         const double fmin = std::max(0.0, mean0 - 1.5 * rms0);
         const double fmax = mean0 + 1.5 * rms0;
 
-        TF1 fE(Form("central_energy_gaus_run%03d_%.3fV", run, REF_VOLTAGE), "gaus", xMin, xMax);
+        // TF1 fE(Form("central_energy_gaus_run%03d_%.3fV", run, REF_VOLTAGE), "gaus", xMin, xMax);
+        TF1 fE(Form("central_energy_gaus_run%03d_%.3fV", run, REF_VOLTAGE), "gaus", fmin, fmax);
         fE.SetParameters(central_crystal_energy->GetMean(), mean0, rms0); // (central_crystal_energy->GetMaximum(), mean0, rms0);
 
         TFitResultPtr rr = central_crystal_energy->Fit(&fE, "RQS"); // stores fit on hist
@@ -1006,14 +1087,17 @@ void adc_calibration_rf_cc_one(const char *filename,
 
     canvas->SaveAs((pdf + "[").c_str());
 
+    autoset_xrange_1d(central_crystal_energy, 0.01, 3);
     central_crystal_energy->Draw("hist e");
     if (TF1 *f = central_crystal_energy->GetFunction(Form("central_energy_gaus_run%03d_%.3fV", run_out, REF_VOLTAGE)))
         f->Draw("same");
     canvas->SaveAs(pdf.c_str());
 
+    autoset_xrange_1d(central_nine_energy, 0.01, 3);
     central_nine_energy->Draw("hist e");
     canvas->SaveAs(pdf.c_str());
 
+    autoset_xrange_1d(total_energy, 0.01, 3);
     total_energy->Draw("hist e");
     canvas->SaveAs(pdf.c_str());
 
@@ -1096,6 +1180,7 @@ void adc_calibration_rf_cc_one(const char *filename,
     {
         canvas->cd(i + 1);
         int cr = crystal_mapping_for_plots[i];
+        autoset_xrange_1d(crystal_energy[cr], 0.01, 2);
         crystal_energy[cr]->Draw("hist e");
     }
     canvas->SaveAs(pdf.c_str());
@@ -1146,6 +1231,7 @@ void adc_calibration_rf_cc_one(const char *filename,
         for (int sipm = 0; sipm < LED_SIPMS_PER_CRYSTAL; sipm++)
         {
             canvas->cd(sipm + 1);
+            autoset_xrange_1d(sipm_energy[cr][sipm], 0.01, 2);
             sipm_energy[cr][sipm]->Draw("hist e");
         }
         canvas->SaveAs(pdf.c_str());
@@ -1155,6 +1241,7 @@ void adc_calibration_rf_cc_one(const char *filename,
         for (int sipm = 0; sipm < LED_SIPMS_PER_CRYSTAL; sipm++)
         {
             canvas->cd(sipm + 1);
+            autoset_xy_2d(sipm_waveform[cr][sipm], 0.01, 1);
             sipm_waveform[cr][sipm]->Draw("colz");
             gPad->SetLogz();
         }
@@ -1182,6 +1269,7 @@ void adc_calibration_rf_cc_one(const char *filename,
     for (int sipm = 0; sipm < LED_SIPMS_PER_CRYSTAL; sipm++)
     {
         canvas->cd(sipm + 1);
+        autoset_xy_2d(E_vs_toa[sipm], 0.01, 1);
         E_vs_toa[sipm]->Draw("colz");
         auto *prof = E_vs_toa[sipm]->ProfileX(Form("prof_%02d", sipm));
         prof->SetDirectory(nullptr);
@@ -1193,22 +1281,22 @@ void adc_calibration_rf_cc_one(const char *filename,
     gPad->SetLogz(0);
 
     // ToA correlation matrix (central crystal)
-    TCanvas *canvas2 = new TCanvas("toa_correlations_canvas", "", 8000, 8000);
-    canvas2->Divide(16, 16, 0.0005, 0.0005);
-    for (int i = 0; i < LED_SIPMS_PER_CRYSTAL; i++)
-    {
-        for (int j = 0; j < LED_SIPMS_PER_CRYSTAL; j++)
-        {
-            if (j <= i)
-            {
-                canvas2->cd(i * LED_SIPMS_PER_CRYSTAL + j + 1);
-                toa_correlations[i][j]->Draw("colz");
-            }
-        }
-    }
-    std::string corr_png = std::string(Form("%s/adc_toa_correlation_Run%03d.png", outdir, run_out));
-    canvas2->SaveAs(corr_png.c_str());
-    delete canvas2;
+    // TCanvas *canvas2 = new TCanvas("toa_correlations_canvas", "", 8000, 8000);
+    // canvas2->Divide(16, 16, 0.0005, 0.0005);
+    // for (int i = 0; i < LED_SIPMS_PER_CRYSTAL; i++)
+    // {
+    //     for (int j = 0; j < LED_SIPMS_PER_CRYSTAL; j++)
+    //     {
+    //         if (j <= i)
+    //         {
+    //             canvas2->cd(i * LED_SIPMS_PER_CRYSTAL + j + 1);
+    //             toa_correlations[i][j]->Draw("colz");
+    //         }
+    //     }
+    // }
+    // std::string corr_png = std::string(Form("%s/adc_toa_correlation_Run%03d.png", outdir, run_out));
+    // canvas2->SaveAs(corr_png.c_str());
+    // delete canvas2;
 
     // Max sample index plots
     canvas->Clear();
@@ -1244,7 +1332,7 @@ void adc_calibration_rf_cc_one(const char *filename,
 
     canvas->SaveAs((pdf + "]").c_str());
     std::cout << "Saved PDF: " << pdf << "\n";
-    std::cout << "Saved ToA correlation PNG: " << corr_png << "\n";
+    // std::cout << "Saved ToA correlation PNG: " << corr_png << "\n";
 
     // ROOT output for the reference calibration
     TFile *out = TFile::Open(root_out.c_str(), "RECREATE");
@@ -1317,13 +1405,13 @@ void adc_calibration_rf_cc_one(const char *filename,
         E_vs_toa[sipm]->Write();
     }
 
-    for (int i = 0; i < LED_SIPMS_PER_CRYSTAL; i++)
-    {
-        for (int j = 0; j < LED_SIPMS_PER_CRYSTAL; j++)
-        {
-            toa_correlations[i][j]->Write();
-        }
-    }
+    // for (int i = 0; i < LED_SIPMS_PER_CRYSTAL; i++)
+    // {
+    //     for (int j = 0; j < LED_SIPMS_PER_CRYSTAL; j++)
+    //     {
+    //         toa_correlations[i][j]->Write();
+    //     }
+    // }
 
     for (int cr = 0; cr < LED_MAX_NUM_CRYSTALS; ++cr)
     {
@@ -1352,6 +1440,41 @@ void adc_calibration_rf_cc_one(const char *filename,
     f->Close();
     delete f;
 
+    // cleanup histograms allocated in this run
+    delete central_crystal_energy;
+    delete central_nine_energy;
+    delete total_energy;
+    delete cog_distribution;
+    delete pedestals;
+    delete pedestals_width;
+    delete toa_distribution;
+    delete toa_sample;
+    delete max_sample_index;
+    delete second_max_sample_index;
+    delete third_max_sample_index;
+
+    for (auto *h : E_vs_toa)
+        delete h;
+
+    // for (int i = 0; i < LED_SIPMS_PER_CRYSTAL; ++i)
+    // {
+    //     for (int j = 0; j < LED_SIPMS_PER_CRYSTAL; ++j)
+    //         delete toa_correlations[i][j];
+    // }
+
+    for (int cr = 0; cr < LED_MAX_NUM_CRYSTALS; ++cr)
+    {
+        delete crystal_energy[cr];
+        delete crystal_energy_shares[cr];
+        delete crystal_common_mode[cr];
+
+        for (int sipm = 0; sipm < LED_SIPMS_PER_CRYSTAL; ++sipm)
+        {
+            delete sipm_energy[cr][sipm];
+            delete sipm_waveform[cr][sipm];
+        }
+    }
+
     delete canvas;
 }
 
@@ -1359,7 +1482,6 @@ void adc_calibration_rf_cc_one(const char *filename,
 // Scan like led_scan list (run, voltage)
 // (uses data/Run%03d.root)
 // ------------------------------------------------------------
-
 
 // ------------------------------------------------------------
 // Run-by-run ADC calibration scan for datasets where voltage is
@@ -1417,8 +1539,7 @@ static std::string find_gain_file_for_run(const char *gain_dir, int run, float v
         std::string(Form("%s/gain_match_Run%03d.root", gain_dir, run)),
         std::string(Form("%s/gain_match_run%03d.root", gain_dir, run)),
         std::string(Form("%s/gain_match_Run%03d_%.3fV.root", gain_dir, run, voltage)),
-        std::string(Form("%s/gain_match_%.3fV.root", gain_dir, voltage))
-    };
+        std::string(Form("%s/gain_match_%.3fV.root", gain_dir, voltage))};
 
     for (const auto &c : candidates)
         if (file_exists_local(c))
@@ -1644,298 +1765,243 @@ static void make_adc_rf_cc_summary(const std::vector<LedRunSummaryRFCC> &rows,
         return;
     }
 
-    // Determine the reference CC for the Rf scan and the reference Rf for the CC scan.
-    // For your run table this naturally selects CC=12 and Rf=3.
-    std::map<int, int> cc_counts_for_rf_scan;
-    std::map<int, int> rf_counts_for_cc_scan;
-
-    for (const auto &r : rows)
-    {
-        cc_counts_for_rf_scan[r.cc]++;
-        rf_counts_for_cc_scan[r.rf]++;
-    }
-
-    int ref_cc = rows.front().cc;
-    int ref_rf = rows.front().rf;
-    int best = -1;
-    for (const auto &kv : cc_counts_for_rf_scan)
-        if (kv.second > best)
-        {
-            best = kv.second;
-            ref_cc = kv.first;
-        }
-
-    best = -1;
-    for (const auto &kv : rf_counts_for_cc_scan)
-        if (kv.second > best)
-        {
-            best = kv.second;
-            ref_rf = kv.first;
-        }
-
     const std::vector<float> voltages = unique_sorted_voltages_from_rows(rows);
 
-    std::string pdf = std::string(Form("%s/adc_calibration_rf_cc_summary.pdf", outdir));
-    std::string root_out = std::string(Form("%s/adc_calibration_rf_cc_summary.root", outdir));
-
-    TCanvas *c = new TCanvas("c_adc_rf_cc_summary", "", 1200, 900);
-    c->SaveAs((pdf + "[").c_str());
-
-    // -------- Page 1: mean and sigma/RMS vs Rf and CC --------
-    c->Clear();
-    c->Divide(2, 2);
-
-    // Mean vs Rf
-    c->cd(1);
-    gPad->SetGrid();
-    TLegend *leg1 = make_basic_legend();
-    bool first_draw = true;
-    int marker_base = 20;
-    for (size_t iv = 0; iv < voltages.size(); ++iv)
+    for (float voltage_sel : voltages)
     {
-        auto *g = new TGraphErrors();
-        g->SetName(Form("g_mean_vs_rf_v%zu", iv));
-        g->SetTitle(Form("Central mean vs Rf (CC=%d);Rf setting;Mean (ADC)", ref_cc));
-        fill_mean_graph_from_rows(g, rows, voltages[iv], true, ref_cc);
-        style_graph_basic(g, marker_base + (int)iv);
-        if (g->GetN() <= 0)
-        {
-            delete g;
-            continue;
-        }
-        g->Draw(first_draw ? "AP" : "P SAME");
-        leg1->AddEntry(g, Form("V = %.3f", voltages[iv]), "lp");
-        first_draw = false;
-    }
-    leg1->Draw();
-    {
-        TLatex t; t.SetNDC(); t.SetTextFont(42); t.SetTextSize(0.04);
-        t.DrawLatex(0.16, 0.92, Form("Rf scan at fixed CC = %d", ref_cc));
-    }
-
-    // Sigma/RMS vs Rf
-    c->cd(2);
-    gPad->SetGrid();
-    TLegend *leg2 = make_basic_legend();
-    first_draw = true;
-    for (size_t iv = 0; iv < voltages.size(); ++iv)
-    {
-        auto *g = new TGraphErrors();
-        g->SetName(Form("g_width_vs_rf_v%zu", iv));
-        g->SetTitle(Form("%s vs Rf (CC=%d);Rf setting;%s (ADC)",
-                         use_rms_for_summary ? "Central RMS" : "Central #sigma",
-                         ref_cc,
-                         use_rms_for_summary ? "RMS" : "#sigma"));
-        fill_graph_from_rows(g, rows, voltages[iv], true, ref_cc, use_rms_for_summary, false);
-        style_graph_basic(g, marker_base + (int)iv);
-        if (g->GetN() <= 0)
-        {
-            delete g;
-            continue;
-        }
-        g->Draw(first_draw ? "AP" : "P SAME");
-        leg2->AddEntry(g, Form("V = %.3f", voltages[iv]), "lp");
-        first_draw = false;
-    }
-    leg2->Draw();
-    {
-        TLatex t; t.SetNDC(); t.SetTextFont(42); t.SetTextSize(0.04);
-        t.DrawLatex(0.16, 0.92, Form("Rf scan at fixed CC = %d", ref_cc));
-    }
-
-    // Mean vs CC
-    c->cd(3);
-    gPad->SetGrid();
-    TLegend *leg3 = make_basic_legend();
-    first_draw = true;
-    for (size_t iv = 0; iv < voltages.size(); ++iv)
-    {
-        auto *g = new TGraphErrors();
-        g->SetName(Form("g_mean_vs_cc_v%zu", iv));
-        g->SetTitle(Form("Central mean vs CC (Rf=%d);CC setting;Mean (ADC)", ref_rf));
-        fill_mean_graph_from_rows(g, rows, voltages[iv], false, ref_rf);
-        style_graph_basic(g, marker_base + (int)iv);
-        if (g->GetN() <= 0)
-        {
-            delete g;
-            continue;
-        }
-        g->Draw(first_draw ? "AP" : "P SAME");
-        leg3->AddEntry(g, Form("V = %.3f", voltages[iv]), "lp");
-        first_draw = false;
-    }
-    leg3->Draw();
-    {
-        TLatex t; t.SetNDC(); t.SetTextFont(42); t.SetTextSize(0.04);
-        t.DrawLatex(0.16, 0.92, Form("CC scan at fixed Rf = %d", ref_rf));
-    }
-
-    // Sigma/RMS vs CC
-    c->cd(4);
-    gPad->SetGrid();
-    TLegend *leg4 = make_basic_legend();
-    first_draw = true;
-    for (size_t iv = 0; iv < voltages.size(); ++iv)
-    {
-        auto *g = new TGraphErrors();
-        g->SetName(Form("g_width_vs_cc_v%zu", iv));
-        g->SetTitle(Form("%s vs CC (Rf=%d);CC setting;%s (ADC)",
-                         use_rms_for_summary ? "Central RMS" : "Central #sigma",
-                         ref_rf,
-                         use_rms_for_summary ? "RMS" : "#sigma"));
-        fill_graph_from_rows(g, rows, voltages[iv], false, ref_rf, use_rms_for_summary, false);
-        style_graph_basic(g, marker_base + (int)iv);
-        if (g->GetN() <= 0)
-        {
-            delete g;
-            continue;
-        }
-        g->Draw(first_draw ? "AP" : "P SAME");
-        leg4->AddEntry(g, Form("V = %.3f", voltages[iv]), "lp");
-        first_draw = false;
-    }
-    leg4->Draw();
-    {
-        TLatex t; t.SetNDC(); t.SetTextFont(42); t.SetTextSize(0.04);
-        t.DrawLatex(0.16, 0.92, Form("CC scan at fixed Rf = %d", ref_rf));
-    }
-
-    c->SaveAs(pdf.c_str());
-
-    // -------- Page 2: resolution vs Rf and CC --------
-    c->Clear();
-    c->Divide(2, 2);
-
-    c->cd(1);
-    gPad->SetGrid();
-    TLegend *leg5 = make_basic_legend();
-    first_draw = true;
-    for (size_t iv = 0; iv < voltages.size(); ++iv)
-    {
-        auto *g = new TGraphErrors();
-        g->SetName(Form("g_res_vs_rf_v%zu", iv));
-        g->SetTitle(Form("Central resolution vs Rf (CC=%d);Rf setting;Resolution (%%)", ref_cc));
-        fill_graph_from_rows(g, rows, voltages[iv], true, ref_cc, use_rms_for_summary, true);
-        style_graph_basic(g, marker_base + (int)iv);
-        if (g->GetN() <= 0)
-        {
-            delete g;
-            continue;
-        }
-        g->Draw(first_draw ? "AP" : "P SAME");
-        leg5->AddEntry(g, Form("V = %.3f", voltages[iv]), "lp");
-        first_draw = false;
-    }
-    leg5->Draw();
-
-    c->cd(2);
-    gPad->SetGrid();
-    TLegend *leg6 = make_basic_legend();
-    first_draw = true;
-    for (size_t iv = 0; iv < voltages.size(); ++iv)
-    {
-        auto *g = new TGraphErrors();
-        g->SetName(Form("g_res_vs_cc_v%zu", iv));
-        g->SetTitle(Form("Central resolution vs CC (Rf=%d);CC setting;Resolution (%%)", ref_rf));
-        fill_graph_from_rows(g, rows, voltages[iv], false, ref_rf, use_rms_for_summary, true);
-        style_graph_basic(g, marker_base + (int)iv);
-        if (g->GetN() <= 0)
-        {
-            delete g;
-            continue;
-        }
-        g->Draw(first_draw ? "AP" : "P SAME");
-        leg6->AddEntry(g, Form("V = %.3f", voltages[iv]), "lp");
-        first_draw = false;
-    }
-    leg6->Draw();
-
-    c->cd(3);
-    {
-        TLatex t;
-        t.SetNDC();
-        t.SetTextFont(42);
-        t.SetTextSize(0.045);
-        t.DrawLatex(0.10, 0.86, "Summary configuration");
-        t.SetTextSize(0.038);
-        t.DrawLatex(0.10, 0.74, Form("Width used in summary: %s", use_rms_for_summary ? "RMS" : "Gaussian fit #sigma"));
-        t.DrawLatex(0.10, 0.66, Form("Rf scan reference CC: %d", ref_cc));
-        t.DrawLatex(0.10, 0.58, Form("CC scan reference Rf: %d", ref_rf));
-        t.DrawLatex(0.10, 0.50, Form("Number of processed runs: %d", (int)rows.size()));
-        std::string vtxt = "Voltages found:";
-        for (float v : voltages)
-            vtxt += Form(" %.3f", v);
-        t.DrawLatex(0.10, 0.40, vtxt.c_str());
-    }
-
-    c->cd(4);
-    {
-        TLatex t;
-        t.SetNDC();
-        t.SetTextFont(42);
-        t.SetTextSize(0.040);
-        t.DrawLatex(0.10, 0.86, "Interpretation");
-        t.SetTextSize(0.035);
-        t.DrawLatex(0.10, 0.74, "Mean tracks the signal scale.");
-        t.DrawLatex(0.10, 0.66, Form("%s tracks the spread.", use_rms_for_summary ? "RMS" : "#sigma"));
-        t.DrawLatex(0.10, 0.58, "Resolution = width / mean.");
-        t.DrawLatex(0.10, 0.50, "Separate voltage series are overlaid on the same axes.");
-        t.DrawLatex(0.10, 0.42, "Per-run detailed PDFs are also written.");
-    }
-
-    c->SaveAs(pdf.c_str());
-    c->SaveAs((pdf + "]").c_str());
-    std::cout << "Saved RF/CC summary PDF: " << pdf << "\n";
-
-    // Save the summary rows to a ROOT tree for convenience
-    TFile *fout = TFile::Open(root_out.c_str(), "RECREATE");
-    if (fout && !fout->IsZombie())
-    {
-        TTree *t = new TTree("rf_cc_summary", "rf_cc_summary");
-        int run = 0, cc = 0, rf = 0;
-        float voltage = 0.0f;
-        float mean = 0.0f, emean = 0.0f, sigma = 0.0f, esigma = 0.0f, rms = 0.0f, erms = 0.0f;
-        float res_fit = 0.0f, res_fit_err = 0.0f, res_rms = 0.0f;
-
-        t->Branch("run", &run, "run/I");
-        t->Branch("voltage", &voltage, "voltage/F");
-        t->Branch("cc", &cc, "cc/I");
-        t->Branch("rf", &rf, "rf/I");
-        t->Branch("mean", &mean, "mean/F");
-        t->Branch("emean", &emean, "emean/F");
-        t->Branch("sigma", &sigma, "sigma/F");
-        t->Branch("esigma", &esigma, "esigma/F");
-        t->Branch("rms", &rms, "rms/F");
-        t->Branch("erms", &erms, "erms/F");
-        t->Branch("res_fit_pct", &res_fit, "res_fit_pct/F");
-        t->Branch("res_fit_pct_err", &res_fit_err, "res_fit_pct_err/F");
-        t->Branch("res_rms_pct", &res_rms, "res_rms_pct/F");
-
+        std::vector<LedRunSummaryRFCC> rows_v;
         for (const auto &r : rows)
         {
-            run = r.run;
-            voltage = r.voltage;
-            cc = r.cc;
-            rf = r.rf;
-            mean = (float)r.mean;
-            emean = (float)r.emean;
-            sigma = (float)r.sigma;
-            esigma = (float)r.esigma;
-            rms = (float)r.rms;
-            erms = (float)r.erms;
-            res_fit = (float)r.res_fit_pct;
-            res_fit_err = (float)r.res_fit_pct_err;
-            res_rms = (float)r.res_rms_pct;
-            t->Fill();
+            if (std::fabs(r.voltage - voltage_sel) < 1e-6f)
+                rows_v.push_back(r);
         }
 
-        t->Write();
-        fout->Close();
-        delete fout;
-        std::cout << "Saved RF/CC summary ROOT: " << root_out << "\n";
-    }
+        if (rows_v.empty())
+            continue;
 
-    delete c;
+        std::map<int, int> cc_counts_for_rf_scan;
+        std::map<int, int> rf_counts_for_cc_scan;
+
+        for (const auto &r : rows_v)
+        {
+            cc_counts_for_rf_scan[r.cc]++;
+            rf_counts_for_cc_scan[r.rf]++;
+        }
+
+        int ref_cc = rows_v.front().cc;
+        int ref_rf = rows_v.front().rf;
+        int best = -1;
+        for (const auto &kv : cc_counts_for_rf_scan)
+            if (kv.second > best)
+            {
+                best = kv.second;
+                ref_cc = kv.first;
+            }
+
+        best = -1;
+        for (const auto &kv : rf_counts_for_cc_scan)
+            if (kv.second > best)
+            {
+                best = kv.second;
+                ref_rf = kv.first;
+            }
+
+        std::string pdf = std::string(Form("%s/adc_calibration_rf_cc_summary_%.3fV.pdf", outdir, voltage_sel));
+        std::string root_out = std::string(Form("%s/adc_calibration_rf_cc_summary_%.3fV.root", outdir, voltage_sel));
+
+        TCanvas *c = new TCanvas(Form("c_adc_rf_cc_summary_%.3fV", voltage_sel), "", 1500, 900);
+        c->SaveAs((pdf + "[").c_str());
+
+        // -------- Page 1: mean and sigma/RMS vs Rf and CC --------
+        c->Clear();
+        c->Divide(2, 2);
+
+        c->cd(1);
+        gPad->SetGrid();
+        {
+            TGraphErrors *g = new TGraphErrors();
+            g->SetName("g_mean_vs_rf");
+            g->SetTitle(Form("Central mean vs Rf (V=%.3f, CC=%d);Rf setting;Mean (ADC)", voltage_sel, ref_cc));
+            fill_mean_graph_from_rows(g, rows_v, voltage_sel, true, ref_cc);
+            style_graph_basic(g, 20);
+            if (g->GetN() > 0)
+                g->Draw("AP");
+            TLatex t;
+            t.SetNDC();
+            t.SetTextFont(42);
+            t.SetTextSize(0.04);
+            // t.DrawLatex(0.16, 0.92, Form("Voltage = %.3f V", voltage_sel));
+        }
+
+        c->cd(2);
+        gPad->SetGrid();
+        {
+            TGraphErrors *g = new TGraphErrors();
+            g->SetName("g_width_vs_rf");
+            g->SetTitle(Form("%s vs Rf (V=%.3f, CC=%d);Rf setting;%s (ADC)",
+                             use_rms_for_summary ? "Central RMS" : "Central #sigma",
+                             voltage_sel, ref_cc,
+                             use_rms_for_summary ? "RMS" : "#sigma"));
+            fill_graph_from_rows(g, rows_v, voltage_sel, true, ref_cc, use_rms_for_summary, false);
+            style_graph_basic(g, 20);
+            if (g->GetN() > 0)
+                g->Draw("AP");
+            TLatex t;
+            t.SetNDC();
+            t.SetTextFont(42);
+            t.SetTextSize(0.04);
+            // t.DrawLatex(0.16, 0.92, Form("Voltage = %.3f V", voltage_sel));
+        }
+
+        c->cd(3);
+        gPad->SetGrid();
+        {
+            TGraphErrors *g = new TGraphErrors();
+            g->SetName("g_mean_vs_cc");
+            g->SetTitle(Form("Central mean vs CC (V=%.3f, Rf=%d);CC setting;Mean (ADC)", voltage_sel, ref_rf));
+            fill_mean_graph_from_rows(g, rows_v, voltage_sel, false, ref_rf);
+            style_graph_basic(g, 20);
+            if (g->GetN() > 0)
+                g->Draw("AP");
+            TLatex t;
+            t.SetNDC();
+            t.SetTextFont(42);
+            t.SetTextSize(0.04);
+            // t.DrawLatex(0.16, 0.92, Form("Voltage = %.3f V", voltage_sel));
+        }
+
+        c->cd(4);
+        gPad->SetGrid();
+        {
+            TGraphErrors *g = new TGraphErrors();
+            g->SetName("g_width_vs_cc");
+            g->SetTitle(Form("%s vs CC (V=%.3f, Rf=%d);CC setting;%s (ADC)",
+                             use_rms_for_summary ? "Central RMS" : "Central #sigma",
+                             voltage_sel, ref_rf,
+                             use_rms_for_summary ? "RMS" : "#sigma"));
+            fill_graph_from_rows(g, rows_v, voltage_sel, false, ref_rf, use_rms_for_summary, false);
+            style_graph_basic(g, 20);
+            if (g->GetN() > 0)
+                g->Draw("AP");
+            TLatex t;
+            t.SetNDC();
+            t.SetTextFont(42);
+            t.SetTextSize(0.04);
+            // t.DrawLatex(0.16, 0.92, Form("Voltage = %.3f V", voltage_sel));
+        }
+
+        c->SaveAs(pdf.c_str());
+
+        // -------- Page 2: resolution vs Rf and CC --------
+        c->Clear();
+        c->Divide(2, 2);
+
+        c->cd(1);
+        gPad->SetGrid();
+        {
+            TGraphErrors *g = new TGraphErrors();
+            g->SetName("g_res_vs_rf");
+            g->SetTitle(Form("Central resolution vs Rf (V=%.3f, CC=%d);Rf setting;Resolution (%%)", voltage_sel, ref_cc));
+            fill_graph_from_rows(g, rows_v, voltage_sel, true, ref_cc, use_rms_for_summary, true);
+            style_graph_basic(g, 20);
+            if (g->GetN() > 0)
+                g->Draw("AP");
+        }
+
+        c->cd(2);
+        gPad->SetGrid();
+        {
+            TGraphErrors *g = new TGraphErrors();
+            g->SetName("g_res_vs_cc");
+            g->SetTitle(Form("Central resolution vs CC (V=%.3f, Rf=%d);CC setting;Resolution (%%)", voltage_sel, ref_rf));
+            fill_graph_from_rows(g, rows_v, voltage_sel, false, ref_rf, use_rms_for_summary, true);
+            style_graph_basic(g, 20);
+            if (g->GetN() > 0)
+                g->Draw("AP");
+        }
+
+        c->cd(3);
+        {
+            TLatex t;
+            t.SetNDC();
+            t.SetTextFont(42);
+            t.SetTextSize(0.045);
+            t.DrawLatex(0.10, 0.86, "Summary configuration");
+            t.SetTextSize(0.038);
+            t.DrawLatex(0.10, 0.74, Form("Voltage: %.3f V", voltage_sel));
+            t.DrawLatex(0.10, 0.66, Form("Width used: %s", use_rms_for_summary ? "RMS" : "Gaussian fit #sigma"));
+            t.DrawLatex(0.10, 0.58, Form("Rf scan reference CC: %d", ref_cc));
+            t.DrawLatex(0.10, 0.50, Form("CC scan reference Rf: %d", ref_rf));
+            t.DrawLatex(0.10, 0.42, Form("Number of processed runs: %d", (int)rows_v.size()));
+        }
+
+        c->cd(4);
+        {
+            TLatex t;
+            t.SetNDC();
+            t.SetTextFont(42);
+            t.SetTextSize(0.040);
+            t.DrawLatex(0.10, 0.86, "Interpretation");
+            t.SetTextSize(0.035);
+            t.DrawLatex(0.10, 0.74, "Mean tracks the signal scale.");
+            t.DrawLatex(0.10, 0.66, Form("%s tracks the spread.", use_rms_for_summary ? "RMS" : "#sigma"));
+            t.DrawLatex(0.10, 0.58, "Resolution = width / mean.");
+            t.DrawLatex(0.10, 0.50, "This PDF contains only one voltage.");
+        }
+
+        c->SaveAs(pdf.c_str());
+        c->SaveAs((pdf + "]").c_str());
+        std::cout << "Saved RF/CC summary PDF: " << pdf << "\n";
+
+        TFile *fout = TFile::Open(root_out.c_str(), "RECREATE");
+        if (fout && !fout->IsZombie())
+        {
+            TTree *t = new TTree("rf_cc_summary", "rf_cc_summary");
+            int run = 0, cc = 0, rf = 0;
+            float voltage = 0.0f;
+            float mean = 0.0f, emean = 0.0f, sigma = 0.0f, esigma = 0.0f, rms = 0.0f, erms = 0.0f;
+            float res_fit = 0.0f, res_fit_err = 0.0f, res_rms = 0.0f;
+
+            t->Branch("run", &run, "run/I");
+            t->Branch("voltage", &voltage, "voltage/F");
+            t->Branch("cc", &cc, "cc/I");
+            t->Branch("rf", &rf, "rf/I");
+            t->Branch("mean", &mean, "mean/F");
+            t->Branch("emean", &emean, "emean/F");
+            t->Branch("sigma", &sigma, "sigma/F");
+            t->Branch("esigma", &esigma, "esigma/F");
+            t->Branch("rms", &rms, "rms/F");
+            t->Branch("erms", &erms, "erms/F");
+            t->Branch("res_fit_pct", &res_fit, "res_fit_pct/F");
+            t->Branch("res_fit_pct_err", &res_fit_err, "res_fit_pct_err/F");
+            t->Branch("res_rms_pct", &res_rms, "res_rms_pct/F");
+
+            for (const auto &r : rows_v)
+            {
+                run = r.run;
+                voltage = r.voltage;
+                cc = r.cc;
+                rf = r.rf;
+                mean = (float)r.mean;
+                emean = (float)r.emean;
+                sigma = (float)r.sigma;
+                esigma = (float)r.esigma;
+                rms = (float)r.rms;
+                erms = (float)r.erms;
+                res_fit = (float)r.res_fit_pct;
+                res_fit_err = (float)r.res_fit_pct_err;
+                res_rms = (float)r.res_rms_pct;
+                t->Fill();
+            }
+
+            t->Write();
+            fout->Close();
+            delete fout;
+            std::cout << "Saved RF/CC summary ROOT: " << root_out << "\n";
+        }
+
+        delete c;
+    }
 }
 
 void adc_calib_rf_cc_scan(const char *data_dir = "data",
@@ -1955,7 +2021,7 @@ void adc_calib_rf_cc_scan(const char *data_dir = "data",
     // IMPORTANT:
     // Use a struct/tuple, not std::vector<std::vector<int,float,...>>.
     std::vector<LedRunCalibRFCC> runs = {
-        {381, 1.26f, 12, 3},
+        // {381, 1.26f, 12, 3},
         {382, 1.26f, 12, 1},
         {383, 1.26f, 12, 2},
         {385, 1.26f, 12, 4},
@@ -2014,8 +2080,7 @@ void adc_calib_rf_cc_scan(const char *data_dir = "data",
         {444, 1.26f, 14, 3},
         {445, 0.0f, 14, 3},
         {446, 1.26f, 15, 3},
-        {447, 0.0f, 15, 3}
-    };
+        {447, 0.0f, 15, 3}};
 
     std::vector<LedRunSummaryRFCC> rows;
     rows.reserve(runs.size());

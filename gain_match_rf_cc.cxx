@@ -8,7 +8,7 @@
 //   root -l -b
 //   .L common_led.cxx+
 //   .L gain_match_rf_cc.cxx+
-//   gain_scan_rf_cc("data", "eeemcal_desy_dec2025_mapping_v2.csv", "outputs_rf_cc", false);
+//   gain_scan_rf_cc("data", "eeemcal_desy_dec2025_mapping_v2.csv", "outputs_rf_cc", true);
 
 // Notes:
 // - This code reads adc/tot with dynamic sizes (TLeaf::GetLen()) like led_analysis.C.
@@ -149,6 +149,65 @@ static bool fit_peak_crystalball(TH1 *hist, float &peak_out, float &sigma_out)
     if (hist->GetFunction("rough_fit"))
         std::cout << "Gaussian rough_fit is stored\n";
     return true;
+}
+
+static void autoset_sipm_plot_range(TH1 *h,
+                                    float peak,
+                                    float sigma,
+                                    double nsigma = 4.0,
+                                    double frac_of_max = 0.02,
+                                    int pad_bins = 2)
+{
+    if (!h || h->GetEntries() <= 0)
+        return;
+
+    // Preferred: use fitted peak and sigma
+    if (peak > 0.0f && sigma > 0.0f)
+    {
+        double xmin = std::max(0.0, (double)peak - nsigma * (double)sigma);
+        double xmax = std::min(h->GetXaxis()->GetXmax(),
+                               (double)peak + nsigma * (double)sigma);
+
+        if (xmax > xmin)
+        {
+            h->GetXaxis()->SetRangeUser(xmin, xmax);
+            return;
+        }
+    }
+
+    // Fallback: derive the visible range from bin content
+    const int nb = h->GetNbinsX();
+    const double thr = std::max(1.0, frac_of_max * h->GetMaximum());
+
+    int first = -1;
+    int last = -1;
+
+    for (int b = 1; b <= nb; ++b)
+    {
+        if (h->GetBinContent(b) > thr)
+        {
+            first = b;
+            break;
+        }
+    }
+
+    for (int b = nb; b >= 1; --b)
+    {
+        if (h->GetBinContent(b) > thr)
+        {
+            last = b;
+            break;
+        }
+    }
+
+    if (first < 0 || last < 0 || first > last)
+        return;
+
+    first = std::max(1, first - pad_bins);
+    last = std::min(nb, last + pad_bins);
+
+    h->GetXaxis()->SetRangeUser(h->GetXaxis()->GetBinLowEdge(first),
+                                h->GetXaxis()->GetBinUpEdge(last));
 }
 
 // ------------------------------------------------------------
@@ -312,12 +371,12 @@ void gain_match_rf_cc_one(const char *filename,
             h_adc[crystal_id][sipm] = new TH1F(
                 Form("h_adc_%.3fV_cr%d_sipm%d", voltage, crystal_id, sipm),
                 Form("ADC-only | %.3f V | crystal %d | sipm %d;Signal;Counts", voltage, crystal_id, sipm),
-                200, 0, 1024);
+                200, 0, 2000);
 
             h_tot[crystal_id][sipm] = new TH1F(
                 Form("h_tot_%.3fV_cr%d_sipm%d", voltage, crystal_id, sipm),
                 Form("ToT-used | %.3f V | crystal %d | sipm %d;Signal;Counts", voltage, crystal_id, sipm),
-                200, 0, 1024);
+                200, 0, 2000);
         }
     }
 
@@ -515,7 +574,16 @@ void gain_match_rf_cc_one(const char *filename,
             canvas->cd(sipm_i + 1);
             TH1F *hist = h_adc[crystal_id][sipm_i];
             if (hist)
+            {
+                autoset_sipm_plot_range(hist,
+                                        peak[crystal_id][sipm_i],
+                                        sigma[crystal_id][sipm_i],
+                                        4.0,  // show ±4 sigma around fitted peak
+                                        0.02, // fallback threshold = 2% of max bin
+                                        2);   // a couple of padding bins
+
                 hist->Draw();
+            }
 
             text.DrawLatex(0.15, 0.83, Form("%.3f V", voltage));
             text.DrawLatex(0.15, 0.78, Form("Crystal %d SiPM %d", crystal_id, sipm_i));
@@ -665,7 +733,7 @@ struct LedGainRunRFCC
 void gain_scan_rf_cc(const char *data_dir = "data",
                      const char *mapping_csv = "eeemcal_desy_dec2025_mapping_v2.csv",
                      const char *outdir = "outputs_rf_cc",
-                     bool use_hybrid_tot = false)
+                     bool use_hybrid_tot = true)
 {
     std::vector<LedGainRunRFCC> runs = {
         {381, 1.26f, 12, 3},
@@ -727,8 +795,7 @@ void gain_scan_rf_cc(const char *data_dir = "data",
         {444, 1.26f, 14, 3},
         {445, 0.0f, 14, 3},
         {446, 1.26f, 15, 3},
-        {447, 0.0f, 15, 3}
-    };
+        {447, 0.0f, 15, 3}};
 
     for (const auto &rv : runs)
     {
