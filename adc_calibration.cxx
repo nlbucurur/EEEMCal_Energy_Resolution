@@ -81,6 +81,85 @@ static inline double photon_energy_eV(double wavelength_nm)
 
 // ---------------------- small helpers ----------------------
 
+static void autoset_xrange_1d(TH1 *h, double frac_of_max = 0.01, int pad_bins = 2)
+{
+    if (!h || h->GetEntries() <= 0)
+        return;
+
+    const int nb = h->GetNbinsX();
+    const double thr = std::max(1.0, frac_of_max * h->GetMaximum());
+
+    int first = -1;
+    int last  = -1;
+
+    for (int b = 1; b <= nb; ++b)
+    {
+        if (h->GetBinContent(b) > thr)
+        {
+            first = b;
+            break;
+        }
+    }
+
+    for (int b = nb; b >= 1; --b)
+    {
+        if (h->GetBinContent(b) > thr)
+        {
+            last = b;
+            break;
+        }
+    }
+
+    if (first < 0 || last < 0 || first > last)
+        return;
+
+    first = std::max(1, first - pad_bins);
+    last  = std::min(nb, last + pad_bins);
+
+    const double xmin = h->GetXaxis()->GetBinLowEdge(first);
+    const double xmax = h->GetXaxis()->GetBinUpEdge(last);
+    h->GetXaxis()->SetRangeUser(xmin, xmax);
+}
+
+static void autoset_xy_2d(TH2 *h, double frac_of_max = 0.01, int pad_bins = 1)
+{
+    if (!h || h->GetEntries() <= 0)
+        return;
+
+    const int nx = h->GetNbinsX();
+    const int ny = h->GetNbinsY();
+    const double thr = std::max(1.0, frac_of_max * h->GetMaximum());
+
+    int firstx = -1, lastx = -1, firsty = -1, lasty = -1;
+
+    for (int bx = 1; bx <= nx; ++bx)
+    {
+        for (int by = 1; by <= ny; ++by)
+        {
+            if (h->GetBinContent(bx, by) > thr)
+            {
+                if (firstx < 0 || bx < firstx) firstx = bx;
+                if (lastx  < 0 || bx > lastx ) lastx  = bx;
+                if (firsty < 0 || by < firsty) firsty = by;
+                if (lasty  < 0 || by > lasty ) lasty  = by;
+            }
+        }
+    }
+
+    if (firstx < 0 || lastx < 0 || firsty < 0 || lasty < 0)
+        return;
+
+    firstx = std::max(1, firstx - pad_bins);
+    lastx  = std::min(nx, lastx + pad_bins);
+    firsty = std::max(1, firsty - pad_bins);
+    lasty  = std::min(ny, lasty + pad_bins);
+
+    h->GetXaxis()->SetRangeUser(h->GetXaxis()->GetBinLowEdge(firstx),
+                                h->GetXaxis()->GetBinUpEdge(lastx));
+    h->GetYaxis()->SetRangeUser(h->GetYaxis()->GetBinLowEdge(firsty),
+                                h->GetYaxis()->GetBinUpEdge(lasty));
+}
+
 static int32_t get_toa_first_nonzero(uint32_t *toa_values)
 {
     for (int i = 0; i < LED_SAMPLES_PER_CHANNEL; ++i)
@@ -327,6 +406,9 @@ void adc_calibration_one(const char *filename,
     int center_nine_ids[8] = {7, 8, 9, 11, 13, 17, 18, 19};
     int remaining_ids[16] = {0, 1, 2, 3, 4, 5, 6, 10, 11, 15, 16, 20, 21, 22, 23, 24};
 
+    bool own_gain_factor = false;
+    bool own_crystal_gain_factor = false;
+
     // ---------------- mapping ----------------
     auto mapping = read_mapping_csv(mapping_csv, LED_SIPMS_PER_CRYSTAL);
     if (mapping.empty())
@@ -354,12 +436,14 @@ void adc_calibration_one(const char *filename,
     if (!gain_factor)
     {
         gain_factor = new TH1F("gain_factors_fallback", "gain_factors_fallback", LED_MAX_NUM_CRYSTALS * LED_SIPMS_PER_CRYSTAL, 0, LED_MAX_NUM_CRYSTALS * LED_SIPMS_PER_CRYSTAL);
+        own_gain_factor = true;
         for (int i = 1; i <= LED_MAX_NUM_CRYSTALS * LED_SIPMS_PER_CRYSTAL; ++i)
             gain_factor->SetBinContent(i, 1.0);
     }
     if (!crystal_gain_factor)
     {
         crystal_gain_factor = new TH1F("crystal_factor_fallback", "crystal_factor_fallback", LED_MAX_NUM_CRYSTALS, 0, LED_MAX_NUM_CRYSTALS);
+        own_crystal_gain_factor = true;
         for (int i = 1; i <= LED_MAX_NUM_CRYSTALS; ++i)
             crystal_gain_factor->SetBinContent(i, 1.0);
     }
@@ -993,14 +1077,17 @@ void adc_calibration_one(const char *filename,
 
     canvas->SaveAs((pdf + "[").c_str());
 
+    autoset_xrange_1d(central_crystal_energy, 0.01, 3);
     central_crystal_energy->Draw("hist e");
     if (TF1 *f = central_crystal_energy->GetFunction(Form("central_energy_gaus_run%03d_%.3fV", run_out, REF_VOLTAGE)))
         f->Draw("same");
     canvas->SaveAs(pdf.c_str());
 
+    autoset_xrange_1d(central_nine_energy, 0.01, 3);
     central_nine_energy->Draw("hist e");
     canvas->SaveAs(pdf.c_str());
 
+    autoset_xrange_1d(total_energy, 0.01, 3);
     total_energy->Draw("hist e");
     canvas->SaveAs(pdf.c_str());
 
@@ -1083,6 +1170,7 @@ void adc_calibration_one(const char *filename,
     {
         canvas->cd(i + 1);
         int cr = crystal_mapping_for_plots[i];
+        autoset_xrange_1d(crystal_energy[cr], 0.01, 2);
         crystal_energy[cr]->Draw("hist e");
     }
     canvas->SaveAs(pdf.c_str());
@@ -1133,6 +1221,7 @@ void adc_calibration_one(const char *filename,
         for (int sipm = 0; sipm < LED_SIPMS_PER_CRYSTAL; sipm++)
         {
             canvas->cd(sipm + 1);
+            autoset_xrange_1d(sipm_energy[cr][sipm], 0.01, 2);
             sipm_energy[cr][sipm]->Draw("hist e");
         }
         canvas->SaveAs(pdf.c_str());
@@ -1142,6 +1231,7 @@ void adc_calibration_one(const char *filename,
         for (int sipm = 0; sipm < LED_SIPMS_PER_CRYSTAL; sipm++)
         {
             canvas->cd(sipm + 1);
+            autoset_xy_2d(sipm_waveform[cr][sipm], 0.01, 1);
             sipm_waveform[cr][sipm]->Draw("colz");
             gPad->SetLogz();
         }
@@ -1169,6 +1259,7 @@ void adc_calibration_one(const char *filename,
     for (int sipm = 0; sipm < LED_SIPMS_PER_CRYSTAL; sipm++)
     {
         canvas->cd(sipm + 1);
+        autoset_xy_2d(E_vs_toa[sipm], 0.01, 1);
         E_vs_toa[sipm]->Draw("colz");
         auto *prof = E_vs_toa[sipm]->ProfileX(Form("prof_%02d", sipm));
         prof->SetDirectory(nullptr);
@@ -1308,6 +1399,7 @@ void adc_calibration_one(const char *filename,
     std::cout << "Saved ROOT: " << root_out << "\n";
 
     // cleanup files
+    // cleanup files
     if (gf)
     {
         gf->Close();
@@ -1315,6 +1407,46 @@ void adc_calibration_one(const char *filename,
     }
     f->Close();
     delete f;
+
+    // cleanup histograms allocated in this run
+    delete central_crystal_energy;
+    delete central_nine_energy;
+    delete total_energy;
+    delete cog_distribution;
+    delete pedestals;
+    delete pedestals_width;
+    delete toa_distribution;
+    delete toa_sample;
+    delete max_sample_index;
+    delete second_max_sample_index;
+    delete third_max_sample_index;
+
+    for (auto *h : E_vs_toa)
+        delete h;
+
+    for (int i = 0; i < LED_SIPMS_PER_CRYSTAL; ++i)
+    {
+        for (int j = 0; j < LED_SIPMS_PER_CRYSTAL; ++j)
+            delete toa_correlations[i][j];
+    }
+
+    for (int cr = 0; cr < LED_MAX_NUM_CRYSTALS; ++cr)
+    {
+        delete crystal_energy[cr];
+        delete crystal_energy_shares[cr];
+        delete crystal_common_mode[cr];
+
+        for (int sipm = 0; sipm < LED_SIPMS_PER_CRYSTAL; ++sipm)
+        {
+            delete sipm_energy[cr][sipm];
+            delete sipm_waveform[cr][sipm];
+        }
+    }
+
+    if (own_gain_factor)
+        delete gain_factor;
+    if (own_crystal_gain_factor)
+        delete crystal_gain_factor;
 
     delete canvas;
 }

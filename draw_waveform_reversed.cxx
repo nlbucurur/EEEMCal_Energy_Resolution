@@ -34,7 +34,7 @@ void draw_waveform_reversed(int run_number,
                             float voltage,
                             const char *in_dir = "data",
                             const char *mapping_csv = "eeemcal_desy_dec2025_mapping_v2.csv",
-                            const char *out_dir = "outputs",
+                            const char *out_dir = "outputs_rf_cc",
                             int sipms_to_use = g_sipms_to_use)
 {
     const int samples_per_channel = LED_SAMPLES_PER_CHANNEL;
@@ -256,8 +256,12 @@ void draw_waveform_reversed(int run_number,
 void led_scan()
 {
     std::vector<std::pair<int, float>> runs = {
-        {23, 0.0f}, {26, 1.2f}, {30, 1.22f}, {33, 1.24f}, {36, 1.25f}, {39, 1.26f}, {42, 1.27f}, {45, 1.28f}, {48, 1.29f}, {51, 1.30f}, {54, 1.32f}, {57, 1.33f}, {60, 1.34f}, {63, 1.36f}, {66, 1.37f}, {69, 1.38f}, {72, 1.40f}, {75, 1.42f}, {78, 1.44f}, {81, 1.46f}, {84, 1.48f}, {87, 1.50f}, {90, 1.52f}, {93, 1.54f}, {96, 1.56f}, {99, 1.58f}, {102, 1.60f}, {105, 1.62f}, {108, 1.64f}, {111, 1.66f}, {114, 1.68f}, {117, 1.70f}, {120, 1.72f}, {123, 1.74f}, {126, 1.76f}, {129, 1.78f}, {132, 1.80f}, {135, 1.82f}, {138, 1.84f}, {141, 1.86f}, {144, 1.88f}};
+        // {23, 0.0f}, {26, 1.2f}, {30, 1.22f}, {33, 1.24f}, {36, 1.25f}, {39, 1.26f}, {42, 1.27f}, {45, 1.28f}, {48, 1.29f}, {51, 1.30f}, {54, 1.32f}, {57, 1.33f}, {60, 1.34f}, {63, 1.36f}, {66, 1.37f}, {69, 1.38f}, {72, 1.40f}, {75, 1.42f}, {78, 1.44f}, {81, 1.46f}, {84, 1.48f}, {87, 1.50f}, {90, 1.52f}, {93, 1.54f}, {96, 1.56f}, {99, 1.58f}, {102, 1.60f}, {105, 1.62f}, {108, 1.64f}, {111, 1.66f}, {114, 1.68f}, {117, 1.70f}, {120, 1.72f}, {123, 1.74f}, {126, 1.76f}, {129, 1.78f}, {132, 1.80f}, {135, 1.82f}, {138, 1.84f}, {141, 1.86f}, {144, 1.88f}};
+        {442, 1.26f},
+        {444, 1.26f},
+        {446, 1.26f}
+    };
 
     for (auto &rv : runs)
-        draw_waveform_reversed(rv.first, rv.second, "data", "eeemcal_desy_dec2025_mapping_v2.csv", "outputs", g_sipms_to_use);
+        draw_waveform_reversed(rv.first, rv.second, "data", "eeemcal_desy_dec2025_mapping_v2.csv", "outputs_rf_cc", g_sipms_to_use);
 }

@@ -155,6 +155,65 @@ static bool fit_peak_crystalball(TH1 *hist, float &peak_out, float &sigma_out)
     return true;
 }
 
+static void autoset_sipm_plot_range(TH1 *h,
+                                    float peak,
+                                    float sigma,
+                                    double nsigma = 4.0,
+                                    double frac_of_max = 0.02,
+                                    int pad_bins = 2)
+{
+    if (!h || h->GetEntries() <= 0)
+        return;
+
+    // Preferred: use fitted peak and sigma
+    if (peak > 0.0f && sigma > 0.0f)
+    {
+        double xmin = std::max(0.0, (double)peak - nsigma * (double)sigma);
+        double xmax = std::min(h->GetXaxis()->GetXmax(),
+                               (double)peak + nsigma * (double)sigma);
+
+        if (xmax > xmin)
+        {
+            h->GetXaxis()->SetRangeUser(xmin, xmax);
+            return;
+        }
+    }
+
+    // Fallback: derive the visible range from bin content
+    const int nb = h->GetNbinsX();
+    const double thr = std::max(1.0, frac_of_max * h->GetMaximum());
+
+    int first = -1;
+    int last = -1;
+
+    for (int b = 1; b <= nb; ++b)
+    {
+        if (h->GetBinContent(b) > thr)
+        {
+            first = b;
+            break;
+        }
+    }
+
+    for (int b = nb; b >= 1; --b)
+    {
+        if (h->GetBinContent(b) > thr)
+        {
+            last = b;
+            break;
+        }
+    }
+
+    if (first < 0 || last < 0 || first > last)
+        return;
+
+    first = std::max(1, first - pad_bins);
+    last = std::min(nb, last + pad_bins);
+
+    h->GetXaxis()->SetRangeUser(h->GetXaxis()->GetBinLowEdge(first),
+                                h->GetXaxis()->GetBinUpEdge(last));
+}
+
 // ------------------------------------------------------------
 // Dead-channel masks
 // Return true if that (crystal,sipm) should be excluded from crystal mean.
@@ -314,12 +373,12 @@ void gain_match_one(const char *filename,
             h_adc[crystal_id][sipm] = new TH1F(
                 Form("h_adc_%.3fV_cr%d_sipm%d", voltage, crystal_id, sipm),
                 Form("ADC-only | %.3f V | crystal %d | sipm %d;Signal;Counts", voltage, crystal_id, sipm),
-                200, 0, 1024);
+                200, 0, 2000);
 
             h_tot[crystal_id][sipm] = new TH1F(
                 Form("h_tot_%.3fV_cr%d_sipm%d", voltage, crystal_id, sipm),
                 Form("ToT-used | %.3f V | crystal %d | sipm %d;Signal;Counts", voltage, crystal_id, sipm),
-                200, 0, 1024);
+                200, 0, 2000);
         }
     }
 
@@ -510,7 +569,16 @@ void gain_match_one(const char *filename,
             canvas->cd(sipm_i + 1);
             TH1F *hist = h_adc[crystal_id][sipm_i];
             if (hist)
+            {
+                autoset_sipm_plot_range(hist,
+                                        peak[crystal_id][sipm_i],
+                                        sigma[crystal_id][sipm_i],
+                                        4.0,  // show ±4 sigma around fitted peak
+                                        0.02, // fallback threshold = 2% of max bin
+                                        2);   // a couple of padding bins
+
                 hist->Draw();
+            }
 
             text.DrawLatex(0.15, 0.83, Form("%.3f V", voltage));
             text.DrawLatex(0.15, 0.78, Form("Crystal %d SiPM %d", crystal_id, sipm_i));
