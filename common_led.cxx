@@ -55,8 +55,8 @@ float g_cog_sy = 0.80f;
 //========================================================//
 //==============       Change this        ================//
 //========================================================//
-// std::set<int> g_selected_central_sipms = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};   // choose 0..15
-std::set<int> g_selected_central_sipms = {15};   // choose 0..15
+std::set<int> g_selected_central_sipms = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};   // choose 0..15
+// std::set<int> g_selected_central_sipms = {15};   // choose 0..15
 
 
 // crystals to ignore (e.g., Tristan ignored crystal 9)
@@ -288,7 +288,7 @@ std::vector<int> get_crystal_channels(const std::map<int, std::vector<int>> &map
 // ===== Signal extraction (ADC) =====
 static inline float pedestal_2samples(uint32_t *adc_values)
 {
-    return (adc_values[0] + adc_values[1] /*+ adc_values[2]*/) / /*3.0f*/2.0f;
+    return (adc_values[0] /*+ adc_values[1] + adc_values[2]*/) /* / 3.0f */ /* / 2.0f */;
 }
 
 float calculate_signal_v2(uint32_t *adc_values, float gain)
@@ -328,7 +328,7 @@ float calculate_signal_v3(uint32_t *adc_values, float gain)
 
     // Signal is the sum of all samples above pedestal
     float signal = 0.0f;
-    for (int i = 3; i <= 5; ++i)
+    for (int i = 2; i <= 7; ++i)
     {
         float sample = adc_values[i] - ped;
         if (sample > 0) signal += sample;
