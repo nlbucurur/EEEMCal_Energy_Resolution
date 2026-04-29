@@ -15,20 +15,27 @@
 // TO RUN automatically on a list of runs/voltages/CC-gains/Rf, use adc_calib_rf_cc_scan() and for cm and not cm:
 // root -l -b
 // .L common_led.cxx+
+// .L gain_match_rf_cc.cxx+
 // .L adc_calibration_rf_cc.cxx+
+// gain_scan_rf_cc("data", "eeemcal_desy_dec2025_mapping_v2.csv", "outputs_rf_cc", true);
 // adc_calib_rf_cc_scan("data","eeemcal_desy_dec2025_mapping_v2.csv","outputs_rf_cc","outputs_rf_cc",true,false,false);
 //
 // Run examples:
 //
 // root -l -b
 // .L common_led.cxx+
+// .L gain_match_rf_cc.cxx+
+// gain_scan_rf_cc("data",
+//                 "eeemcal_desy_dec2025_mapping_v2.csv",
+//                  "outputs_rf_cc",
+//                  true); // use_hybrid_tot
 // .L adc_calibration_rf_cc.cxx+
 // adc_calib_rf_cc_scan("data",
 //                      "eeemcal_desy_dec2025_mapping_v2.csv",
 //                      "outputs_rf_cc",
 //                      "outputs",
 //                      true,   // use_hybrid_tot
-//                      false,   // use_common_mode
+//                      false,   // use_common_mode extraction as pedestal
 //                      false); // false = use fitted sigma in summary, true = use RMS
 //
 
@@ -71,6 +78,7 @@
 #include <TFitResult.h>
 #include <TFitResultPtr.h>
 #include <TLegend.h>
+#include <TPaveText.h>
 
 static constexpr double WAVELENGTH_NM = 470.0; // for photon energy conversion
 
@@ -86,7 +94,7 @@ static inline double photon_energy_eV(double wavelength_nm)
 
 // ---------------------- small helpers ----------------------
 
-static void autoset_xrange_1d(TH1 *h, double frac_of_max = 0.01, int pad_bins = 2)
+static void autoset_xrange_1d(TH1 *h, double frac_of_max = 0.01, int pad_bins = 50)
 {
     if (!h || h->GetEntries() <= 0)
         return;
@@ -124,9 +132,10 @@ static void autoset_xrange_1d(TH1 *h, double frac_of_max = 0.01, int pad_bins = 
     const double xmin = h->GetXaxis()->GetBinLowEdge(first);
     const double xmax = h->GetXaxis()->GetBinUpEdge(last);
     h->GetXaxis()->SetRangeUser(xmin, xmax);
+    h->GetYaxis()->SetRangeUser(0.0, h->GetMaximum() * 1.2);
 }
 
-static void autoset_xy_2d(TH2 *h, double frac_of_max = 0.01, int pad_bins = 1)
+static void autoset_xy_2d(TH2 *h, double frac_of_max = 0.01, int pad_bins = 50)
 {
     if (!h || h->GetEntries() <= 0)
         return;
@@ -163,6 +172,80 @@ static void autoset_xy_2d(TH2 *h, double frac_of_max = 0.01, int pad_bins = 1)
                                 h->GetXaxis()->GetBinUpEdge(lastx));
     h->GetYaxis()->SetRangeUser(h->GetYaxis()->GetBinLowEdge(firsty),
                                 h->GetYaxis()->GetBinUpEdge(lasty));
+}
+
+struct PeakSummary
+{
+    double mean = 0.0;
+    double sigma = 0.0;
+    double resolution = 0.0;
+    double mean_err = 0.0;
+    double sigma_err = 0.0;
+    double resolution_err = 0.0;
+    bool fit_ok = false;
+};
+
+static PeakSummary fit_gaussian_peak_summary(TH1 *h,
+                                             const char *fit_name,
+                                             double min_rms = 1.0,
+                                             double n_sigma_fit = 1.5)
+{
+    PeakSummary out;
+    if (!h || h->GetEntries() < 50 || h->GetRMS() <= 0.0)
+        return out;
+
+    const double mean0 = h->GetMean();
+    const double rms0 = std::max(min_rms, (double)h->GetRMS());
+    const double xlo = h->GetXaxis()->GetXmin();
+    const double xhi = h->GetXaxis()->GetXmax();
+    const double fmin = std::max(xlo, mean0 - n_sigma_fit * rms0);
+    const double fmax = std::min(xhi, mean0 + n_sigma_fit * rms0);
+    if (fmax <= fmin)
+        return out;
+
+    TF1 f(fit_name, "gaus", fmin, fmax);
+    f.SetParameters(h->GetMaximum(), mean0, rms0);
+    TFitResultPtr rr = h->Fit(&f, "RQS");
+
+    if (rr.Get() && rr->Status() == 0)
+    {
+        out.mean = f.GetParameter(1);
+        out.sigma = std::abs(f.GetParameter(2));
+        out.mean_err = f.GetParError(1);
+        out.sigma_err = f.GetParError(2);
+        out.resolution = (out.mean != 0.0) ? (out.sigma / out.mean) : 0.0;
+        if (out.mean != 0.0 && out.sigma != 0.0)
+        {
+            const double rel_sigma = out.sigma_err / out.sigma;
+            const double rel_mean = out.mean_err / out.mean;
+            out.resolution_err = std::abs(out.resolution) * std::sqrt(rel_sigma * rel_sigma + rel_mean * rel_mean);
+        }
+        out.fit_ok = true;
+    }
+    return out;
+}
+
+static void draw_run_info_box(int run,
+                              int cc,
+                              int rf,
+                              float led_voltage,
+                              float voltage_sipm,
+                              const char *mode_label = "")
+{
+    TPaveText *box = new TPaveText(0.63, 0.70, 0.89, 0.89, "NDC");
+    box->SetFillColor(0);
+    box->SetFillStyle(1001);
+    box->SetBorderSize(1);
+    box->SetTextFont(42);
+    box->SetTextSize(0.020);
+    box->SetTextAlign(12);
+    if (mode_label && mode_label[0]) box->AddText(mode_label);
+    box->AddText(Form("Run: %03d", run));
+    box->AddText(Form("Rf: %d", rf));
+    box->AddText(Form("CC: %d", cc));
+    box->AddText(Form("LED voltage: %.3f V", led_voltage));
+    box->AddText(Form("SiPM voltage: %.2f V", voltage_sipm));
+    box->Draw();
 }
 
 static int32_t get_toa_first_nonzero(uint32_t *toa_values)
@@ -370,7 +453,9 @@ void adc_calibration_rf_cc_one(const char *filename,
                                bool use_common_mode = true,
                                float led_wavelength_nm = 470.0f,
                                int cc = -1,
-                               int rf = -1)
+                               int rf = -1,
+                                float voltage_sipm = 40.5f,
+                               bool make_tot_summary = false)
 {
     gStyle->SetOptStat(0);
     gErrorIgnoreLevel = kWarning;
@@ -542,18 +627,23 @@ void adc_calibration_rf_cc_one(const char *filename,
         std::cerr << "Warning: requested hybrid ToT but tot branch/len not compatible. Using ADC-only.\n";
         use_hybrid_tot = false;
     }
+    if (make_tot_summary && !have_tot)
+    {
+        std::cerr << "Warning: requested ToT summary but tot branch/len not compatible. ToT plots will be empty.\n";
+        make_tot_summary = false;
+    }
 
     std::vector<uint32_t> adc_buf((size_t)n_adc);
     std::vector<uint32_t> tot_buf;
     std::vector<uint32_t> toa_buf;
 
-    if (use_hybrid_tot)
+    if (use_hybrid_tot || make_tot_summary)
         tot_buf.resize((size_t)n_adc);
     if (have_toa)
         toa_buf.resize((size_t)n_adc);
 
     tree->SetBranchAddress("adc", adc_buf.data());
-    if (use_hybrid_tot)
+    if (use_hybrid_tot || make_tot_summary)
         tree->SetBranchAddress("tot", tot_buf.data());
     if (have_toa)
         tree->SetBranchAddress("toa", toa_buf.data());
@@ -571,15 +661,19 @@ void adc_calibration_rf_cc_one(const char *filename,
     // ---------------- Histograms (global) ----------------
     TH1 *central_crystal_energy = new TH1F("central_crystal_energy",
                                            Form("Central Crystal Energy (%.3f V);Energy (ADC);Events", voltage),
-                                           500, 0, 20000);
+                                           5000, 0, 20000);
 
     TH1 *central_nine_energy = new TH1F("central_nine_energy",
                                         Form("Central 3x3 Energy (%.3f V);Energy (ADC);Events", voltage),
-                                        500, 0, 20000);
+                                        5000, 0, 20000);
 
     TH1 *total_energy = new TH1F("total_energy",
                                  Form("Total Energy (%.3f V);Energy (ADC);Events", voltage),
-                                 500, 0, 75000);
+                                 5000, 0, 75000);
+    
+    TH1 *central_crystal_tot = new TH1F("central_crystal_tot",
+                                         Form("Central Crystal ToT (Run %03d, %.3f V);ToT sum;Events", extract_run_number(filename), voltage),
+                                         4000, 0, 40000);
 
     TH2 *cog_distribution = new TH2F("cog_distribution",
                                      "Center of Gravity Distribution;X (# Crystals);Y (# Crystals)",
@@ -602,7 +696,7 @@ void adc_calibration_rf_cc_one(const char *filename,
     {
         E_vs_toa.push_back(new TH2F(Form("E_vs_toa_sipm_%d", sipm),
                                     Form("Central Crystal SiPM %d: Energy vs ToA;ToA;Energy (ADC)", sipm),
-                                    1024, 0, 1024, 500, 0, 3000));
+                                    1024, 0, 1024, 5000, 0, 3000));
     }
 
     // ToA correlations (central crystal only)
@@ -632,7 +726,7 @@ void adc_calibration_rf_cc_one(const char *filename,
         {
             sipm_energy[cr][sipm] = new TH1F(Form("crystal_%02d_sipm_%02d_energy", cr, sipm),
                                              Form("Crystal %02d SiPM %02d Energy;Energy (ADC);Events", cr, sipm),
-                                             500, 0, 4000);
+                                             5000, 0, 4000);
 
             sipm_waveform[cr][sipm] = new TH2F(Form("crystal_%02d_sipm_%02d_waveform", cr, sipm),
                                                Form("Crystal %02d SiPM %02d Waveform;Sample;ADC", cr, sipm),
@@ -641,7 +735,7 @@ void adc_calibration_rf_cc_one(const char *filename,
 
         crystal_energy[cr] = new TH1F(Form("crystal_%02d_energy", cr),
                                       Form("Crystal %02d Energy;Energy (ADC);Events", cr),
-                                      500, 0, 40000);
+                                      5000, 0, 40000);
 
         crystal_energy_shares[cr] = new TH1F(Form("crystal_%02d_energy_share", cr),
                                              Form("Crystal %02d Energy Share;Energy Share;Events", cr),
@@ -686,6 +780,8 @@ void adc_calibration_rf_cc_one(const char *filename,
         std::unordered_map<int, bool> cm_ok;
 
         bool is_tot = false;
+        float central_tot_signal = 0.0f;
+        bool central_tot_seen = false;
 
         // accumulate per-crystal signal for this event
         std::map<int, float> signals;
@@ -739,6 +835,16 @@ void adc_calibration_rf_cc_one(const char *filename,
 
             // gain
             float gain = gain_factor->GetBinContent(cr * LED_SIPMS_PER_CRYSTAL + sipm + 1);
+
+            if (make_tot_summary && have_tot && cr == central_crystal_id)
+            {
+                const uint32_t tot_value = get_tot_first(tot_ptr(ch));
+                if (tot_value > 0)
+                {
+                    central_tot_signal += (float)tot_value * gain;
+                    central_tot_seen = true;
+                }
+            }
 
             // common-mode (optional, per crystal)
             float cm = 0.0f;
@@ -807,7 +913,7 @@ void adc_calibration_rf_cc_one(const char *filename,
             sipm_energy[cr][sipm]->Fill(channel_signal);
 
             // waveform fill
-            float pedestal = (adc_used[0] + adc_used[1] /*+ adc_used[2]*/) / 2.0f;
+            float pedestal = (adc_used[0] /*+ adc_used[1] + adc_used[2]*/) /*/ 2.0f*/;
             int i1 = -1, i2 = -1, i3 = -1;
             float max1 = -1e9f, max2 = -1e9f, max3 = -1e9f;
 
@@ -953,6 +1059,8 @@ void adc_calibration_rf_cc_one(const char *filename,
         central_crystal_energy->Fill(central_signal);
         central_nine_energy->Fill(central_nine_signal);
         total_energy->Fill(total_signal);
+        if (make_tot_summary && central_tot_seen)
+            central_crystal_tot->Fill(central_tot_signal);
 
         // per-crystal energy + share
         if (total_signal > 0)
@@ -1069,6 +1177,20 @@ void adc_calibration_rf_cc_one(const char *filename,
               << " sigma=" << e_sigma
               << " resolution=" << 100.0 * e_res << " %"
               << (e_fit_ok ? "" : " (fit failed)") << "\n";
+    
+    PeakSummary tot_peak;
+    if (make_tot_summary)
+    {
+        tot_peak = fit_gaussian_peak_summary(central_crystal_tot,
+                                             Form("central_tot_gaus_run%03d_%.3fV", run, REF_VOLTAGE),
+                                             1.0,
+                                             1.5);
+        std::cout << "Central crystal ToT peak @ " << REF_VOLTAGE
+                  << " V: mean=" << tot_peak.mean
+                  << " sigma=" << tot_peak.sigma
+                  << " resolution=" << 100.0 * tot_peak.resolution << " %"
+                  << (tot_peak.fit_ok ? "" : " (fit failed)") << "\n";
+    }
 
     // ---------------- save outputs ----------------
     int run_out = extract_run_number(filename);
@@ -1079,26 +1201,49 @@ void adc_calibration_rf_cc_one(const char *filename,
     if (rf >= 0)
         out_tag += Form("_Rf%d", rf);
 
-    std::string pdf = std::string(Form("%s/adc_calibration_%s.pdf", outdir, out_tag.c_str()));
-    std::string root_out = std::string(Form("%s/adc_to_ref_calibration_%s.root", outdir, out_tag.c_str()));
+    const char *file_prefix = make_tot_summary ? "tot_calibration" : "adc_calibration";
+    const char *root_prefix = make_tot_summary ? "tot_calibration" : "adc_to_ref_calibration";
+    std::string pdf = std::string(Form("%s/%s_%s.pdf", outdir, file_prefix, out_tag.c_str()));
+    std::string root_out = std::string(Form("%s/%s_%s.root", outdir, root_prefix, out_tag.c_str()));
 
     TCanvas *canvas = new TCanvas("adc_calibration_canvas", "", 900, 700);
     canvas->SetRightMargin(0.05);
 
     canvas->SaveAs((pdf + "[").c_str());
 
-    autoset_xrange_1d(central_crystal_energy, 0.01, 3);
+    autoset_xrange_1d(central_crystal_energy, 0.01, 50);
     central_crystal_energy->Draw("hist e");
     if (TF1 *f = central_crystal_energy->GetFunction(Form("central_energy_gaus_run%03d_%.3fV", run_out, REF_VOLTAGE)))
         f->Draw("same");
+    draw_run_info_box(run_out, cc, rf, voltage, voltage_sipm, "ADC central crystal");
     canvas->SaveAs(pdf.c_str());
 
-    autoset_xrange_1d(central_nine_energy, 0.01, 3);
+    if (make_tot_summary)
+    {
+        canvas->Clear();
+        autoset_xrange_1d(central_crystal_tot, 0.01, 50);
+        central_crystal_tot->Draw("hist e");
+        if (TF1 *f = central_crystal_tot->GetFunction(Form("central_tot_gaus_run%03d_%.3fV", run_out, REF_VOLTAGE)))
+            f->Draw("same");
+        draw_run_info_box(run_out, cc, rf, voltage, voltage_sipm, "ToT central crystal");
+        TLatex tt;
+        tt.SetNDC();
+        tt.SetTextFont(42);
+        tt.SetTextSize(0.035);
+        tt.DrawLatex(0.14, 0.84, Form("ToT mean = %.3f", tot_peak.mean));
+        tt.DrawLatex(0.14, 0.79, Form("ToT #sigma = %.3f", tot_peak.sigma));
+        tt.DrawLatex(0.14, 0.74, Form("ToT resolution = %.2f%%", 100.0 * tot_peak.resolution));
+        canvas->SaveAs(pdf.c_str());
+    }
+
+    autoset_xrange_1d(central_nine_energy, 0.01, 50);
     central_nine_energy->Draw("hist e");
+    draw_run_info_box(run_out, cc, rf, voltage, voltage_sipm, "Central 3x3");
     canvas->SaveAs(pdf.c_str());
 
-    autoset_xrange_1d(total_energy, 0.01, 3);
+    autoset_xrange_1d(total_energy, 0.01, 50);
     total_energy->Draw("hist e");
+    draw_run_info_box(run_out, cc, rf, voltage, voltage_sipm, "Total energy");
     canvas->SaveAs(pdf.c_str());
 
     // COG plot + grid + ellipse visualization if you want
@@ -1138,6 +1283,7 @@ void adc_calibration_rf_cc_one(const char *filename,
     canvas->Clear();
     gPad->SetLogz(0);
     pedestals->Draw("colz");
+    draw_run_info_box(run_out, cc, rf, voltage, voltage_sipm, "Pedestals");
     // pedestals->GetYaxis()->SetRangeUser(0, 200);
     canvas->SaveAs(pdf.c_str());
 
@@ -1170,6 +1316,7 @@ void adc_calibration_rf_cc_one(const char *filename,
 
     // pedestals_width->Draw("P");
     pedestals_width->Draw();
+    draw_run_info_box(run_out, cc, rf, voltage, voltage_sipm, "Pedestal Widths");
     // pedestals_width->GetYaxis()->SetRangeUser(0, 5);
     canvas->SaveAs(pdf.c_str());
 
@@ -1180,8 +1327,9 @@ void adc_calibration_rf_cc_one(const char *filename,
     {
         canvas->cd(i + 1);
         int cr = crystal_mapping_for_plots[i];
-        autoset_xrange_1d(crystal_energy[cr], 0.01, 2);
+        autoset_xrange_1d(crystal_energy[cr], 0.01, 50);
         crystal_energy[cr]->Draw("hist e");
+        draw_run_info_box(run_out, cc, rf, voltage, voltage_sipm, Form("Crystal %d Energy", cr));
     }
     canvas->SaveAs(pdf.c_str());
 
@@ -1198,6 +1346,7 @@ void adc_calibration_rf_cc_one(const char *filename,
 
         crystal_energy_shares[cr]->SetLineColor(kRed);
         crystal_energy_shares[cr]->Draw("hist e");
+        draw_run_info_box(run_out, cc, rf, voltage, voltage_sipm, Form("Crystal %d Shares", cr));
         crystal_energy_shares[cr]->GetXaxis()->SetRangeUser(0.001, 1);
         gPad->SetLogx();
 
@@ -1231,8 +1380,9 @@ void adc_calibration_rf_cc_one(const char *filename,
         for (int sipm = 0; sipm < LED_SIPMS_PER_CRYSTAL; sipm++)
         {
             canvas->cd(sipm + 1);
-            autoset_xrange_1d(sipm_energy[cr][sipm], 0.01, 2);
+            autoset_xrange_1d(sipm_energy[cr][sipm], 0.01, 50);
             sipm_energy[cr][sipm]->Draw("hist e");
+            draw_run_info_box(run_out, cc, rf, voltage, voltage_sipm, Form("Crystal %d SiPM %d Energy", cr, sipm));
         }
         canvas->SaveAs(pdf.c_str());
 
@@ -1241,8 +1391,9 @@ void adc_calibration_rf_cc_one(const char *filename,
         for (int sipm = 0; sipm < LED_SIPMS_PER_CRYSTAL; sipm++)
         {
             canvas->cd(sipm + 1);
-            autoset_xy_2d(sipm_waveform[cr][sipm], 0.01, 1);
+            autoset_xy_2d(sipm_waveform[cr][sipm], 0.01, 50);
             sipm_waveform[cr][sipm]->Draw("colz");
+            draw_run_info_box(run_out, cc, rf, voltage, voltage_sipm, Form("Crystal %d SiPM %d Waveform", cr, sipm));
             gPad->SetLogz();
         }
         canvas->SaveAs(pdf.c_str());
@@ -1269,7 +1420,7 @@ void adc_calibration_rf_cc_one(const char *filename,
     for (int sipm = 0; sipm < LED_SIPMS_PER_CRYSTAL; sipm++)
     {
         canvas->cd(sipm + 1);
-        autoset_xy_2d(E_vs_toa[sipm], 0.01, 1);
+        autoset_xy_2d(E_vs_toa[sipm], 0.01, 50);
         E_vs_toa[sipm]->Draw("colz");
         auto *prof = E_vs_toa[sipm]->ProfileX(Form("prof_%02d", sipm));
         prof->SetDirectory(nullptr);
@@ -1316,7 +1467,8 @@ void adc_calibration_rf_cc_one(const char *filename,
     TLatex t;
     t.SetNDC();
     t.SetTextSize(0.04);
-    t.DrawLatex(0.12, 0.84, Form("Run: %03d   Voltage label: %.3f V", run_out, voltage));
+    t.DrawLatex(0.12, 0.89, Form("Run: %03d   LED Voltage: %.3f V", run_out, voltage));
+    t.DrawLatex(0.12, 0.84, Form("SiPM voltage: %.2f V", voltage_sipm));
     if (cc >= 0)
         t.DrawLatex(0.12, 0.79, Form("CC gain setting: %d", cc));
     if (rf >= 0)
@@ -1327,6 +1479,13 @@ void adc_calibration_rf_cc_one(const char *filename,
     t.DrawLatex(0.12, 0.54, Form("ToT mode used: %s", use_hybrid_tot ? "hybrid ADC/ToT" : "ADC-only"));
     t.DrawLatex(0.12, 0.49, Form("Common-mode subtraction: %s", use_common_mode ? "enabled" : "disabled"));
     t.DrawLatex(0.12, 0.44, Form("Central energy res (sigma/mu): %.2f%%", 100.0 * e_res));
+
+    if (make_tot_summary)
+    {
+        t.DrawLatex(0.12, 0.39, Form("Central ToT mean: %.3f", tot_peak.mean));
+        t.DrawLatex(0.12, 0.34, Form("Central ToT #sigma: %.3f", tot_peak.sigma));
+        t.DrawLatex(0.12, 0.29, Form("Central ToT res (#sigma/#mu): %.2f%%", 100.0 * tot_peak.resolution));
+    }
 
     canvas->SaveAs(pdf.c_str());
 
@@ -1372,6 +1531,8 @@ void adc_calibration_rf_cc_one(const char *filename,
     TParameter<int>("cc_gain", cc).Write();
     TParameter<int>("rf_setting", rf).Write();
     TParameter<float>("label_voltage_V", voltage).Write();
+    TParameter<float>("voltage_sipm_V", voltage_sipm).Write();
+    TParameter<int>("is_tot_summary", make_tot_summary ? 1 : 0).Write();
     TParameter<float>("summary_mean", (float)e_mu).Write();
     TParameter<float>("summary_sigma_fit", (float)e_sigma).Write();
     TParameter<float>("summary_sigma_fit_err", (float)e_sigma_err).Write();
@@ -1388,9 +1549,23 @@ void adc_calibration_rf_cc_one(const char *filename,
         TParameter<float>("summary_resolution_pct_rms", res_rms_pct).Write();
     }
 
+    if (make_tot_summary)
+    {
+        TParameter<float>("summary_tot_mean", (float)tot_peak.mean).Write();
+        TParameter<float>("summary_tot_mean_err", (float)tot_peak.mean_err).Write();
+        TParameter<float>("summary_tot_sigma", (float)tot_peak.sigma).Write();
+        TParameter<float>("summary_tot_sigma_err", (float)tot_peak.sigma_err).Write();
+        TParameter<float>("summary_tot_resolution_pct", (float)(100.0 * tot_peak.resolution)).Write();
+        TParameter<float>("summary_tot_resolution_pct_err", (float)(100.0 * tot_peak.resolution_err)).Write();
+        TParameter<int>("summary_tot_fit_ok", tot_peak.fit_ok ? 1 : 0).Write();
+        TParameter<float>("summary_tot_rms_raw", (float)central_crystal_tot->GetRMS()).Write();
+        TParameter<float>("summary_tot_rms_raw_err", (float)central_crystal_tot->GetRMSError()).Write();
+    }
+
     central_crystal_energy->Write();
     central_nine_energy->Write();
     total_energy->Write();
+    central_crystal_tot->Write();
     cog_distribution->Write();
     pedestals->Write();
     pedestals_width->Write();
@@ -1507,6 +1682,8 @@ struct LedRunSummaryRFCC
     float voltage = 0.0f;
     int cc = -1;
     int rf = -1;
+    float voltage_sipm = 0.0f;
+    bool is_tot_summary = false;
     double mean = 0.0;
     double emean = 0.0;
     double sigma = 0.0;
@@ -1516,6 +1693,12 @@ struct LedRunSummaryRFCC
     double res_fit_pct = 0.0;
     double res_fit_pct_err = 0.0;
     double res_rms_pct = 0.0;
+    double tot_mean = 0.0;
+    double tot_emean = 0.0;
+    double tot_sigma = 0.0;
+    double tot_esigma = 0.0;
+    double tot_res_pct = 0.0;
+    double tot_res_pct_err = 0.0;
 };
 
 static std::string make_rf_cc_tag(int run, float voltage, int cc, int rf)
@@ -1599,10 +1782,14 @@ static bool read_run_summary_from_root(const std::string &root_path, LedRunSumma
     ok &= getInt("run_number", row.run);
     ok &= getInt("cc_gain", row.cc);
     ok &= getInt("rf_setting", row.rf);
+    int is_tot = 0;
+    if (getInt("is_tot_summary", is_tot)) row.is_tot_summary = (is_tot != 0);
 
     double tmp = 0.0;
     ok &= getFloat("label_voltage_V", tmp);
     row.voltage = (float)tmp;
+    if (getFloat("voltage_sipm_V", tmp))
+        row.voltage_sipm = (float)tmp;
 
     // Prefer raw mean for consistency with the RMS option; if unavailable use fit mean.
     if (getFloat("summary_mean_raw", row.mean))
@@ -1620,6 +1807,17 @@ static bool read_run_summary_from_root(const std::string &root_path, LedRunSumma
     getFloat("summary_resolution_pct_fit", row.res_fit_pct);
     getFloat("summary_resolution_pct_fit_err", row.res_fit_pct_err);
     getFloat("summary_resolution_pct_rms", row.res_rms_pct);
+
+    // Read ToT summary if available
+    if (row.is_tot_summary)
+    {
+        ok &= getFloat("summary_tot_mean", row.tot_mean);
+        ok &= getFloat("summary_tot_mean_err", row.tot_emean);
+        ok &= getFloat("summary_tot_sigma", row.tot_sigma);
+        ok &= getFloat("summary_tot_sigma_err", row.tot_esigma);
+        ok &= getFloat("summary_tot_resolution_pct", row.tot_res_pct);
+        ok &= getFloat("summary_tot_resolution_pct_err", row.tot_res_pct_err);
+    }
 
     f->Close();
     delete f;
@@ -1644,8 +1842,10 @@ static void style_graph_basic(TGraphErrors *g, int marker)
     if (!g)
         return;
     g->SetMarkerStyle(marker);
-    g->SetMarkerSize(1.1);
+    g->SetMarkerSize(2);
+    g->SetMarkerColor(kOrange + 1);
     g->SetLineWidth(2);
+    g->SetLineColor(kBlue + 2);
 }
 
 static TLegend *make_basic_legend()
@@ -1670,6 +1870,8 @@ static void fill_graph_from_rows(TGraphErrors *g,
     int ip = 0;
     for (const auto &r : rows)
     {
+        if (r.is_tot_summary)
+            continue;
         if (std::fabs(r.voltage - voltage) > 1e-6f)
             continue;
 
@@ -1734,6 +1936,8 @@ static void fill_mean_graph_from_rows(TGraphErrors *g,
 
     for (const auto &r : rows)
     {
+        if (r.is_tot_summary)
+            continue;
         if (std::fabs(r.voltage - voltage) > 1e-6f)
             continue;
 
@@ -1755,6 +1959,43 @@ static void fill_mean_graph_from_rows(TGraphErrors *g,
     }
 }
 
+static void fill_tot_graph_from_rows(TGraphErrors *g,
+                                     const std::vector<LedRunSummaryRFCC> &rows,
+                                     float voltage,
+                                     bool scan_rf,
+                                     int fixed_value,
+                                     int which)
+{
+    if (!g)
+        return;
+
+    for (const auto &r : rows)
+    {
+        if (!r.is_tot_summary)
+            continue;
+        if (std::fabs(r.voltage - voltage) > 1e-6f)
+            continue;
+        if (scan_rf)
+        {
+            if (r.cc != fixed_value) continue;
+        }
+        else
+        {
+            if (r.rf != fixed_value) continue;
+        }
+
+        const double x = scan_rf ? (double)r.rf : (double)r.cc;
+        double y = 0.0, ey = 0.0;
+        if (which == 0) { y = r.tot_mean; ey = r.tot_emean; }
+        if (which == 1) { y = r.tot_sigma; ey = r.tot_esigma; }
+        if (which == 2) { y = r.tot_res_pct; ey = r.tot_res_pct_err; }
+
+        const int n = g->GetN();
+        g->SetPoint(n, x, y);
+        g->SetPointError(n, 0.0, ey);
+    }
+}
+
 static void make_adc_rf_cc_summary(const std::vector<LedRunSummaryRFCC> &rows,
                                    const char *outdir,
                                    bool use_rms_for_summary = false)
@@ -1770,202 +2011,348 @@ static void make_adc_rf_cc_summary(const std::vector<LedRunSummaryRFCC> &rows,
     for (float voltage_sel : voltages)
     {
         std::vector<LedRunSummaryRFCC> rows_v;
+        std::vector<LedRunSummaryRFCC> adc_rows_v;
+        std::vector<LedRunSummaryRFCC> tot_rows_v;
+
         for (const auto &r : rows)
         {
             if (std::fabs(r.voltage - voltage_sel) < 1e-6f)
+            {
                 rows_v.push_back(r);
+                if (r.is_tot_summary)
+                    tot_rows_v.push_back(r);
+                else
+                    adc_rows_v.push_back(r);
+            }
         }
 
         if (rows_v.empty())
             continue;
 
-        std::map<int, int> cc_counts_for_rf_scan;
-        std::map<int, int> rf_counts_for_cc_scan;
+        const bool has_adc_for_voltage = !adc_rows_v.empty();
+        const bool has_tot_for_voltage = !tot_rows_v.empty();
 
-        for (const auto &r : rows_v)
+        if (!has_adc_for_voltage && !has_tot_for_voltage)
+            continue;
+
+        auto choose_refs = [](const std::vector<LedRunSummaryRFCC> &subset,
+                              int &ref_cc,
+                              int &ref_rf)
         {
-            cc_counts_for_rf_scan[r.cc]++;
-            rf_counts_for_cc_scan[r.rf]++;
-        }
+            std::map<int, int> cc_counts_for_rf_scan;
+            std::map<int, int> rf_counts_for_cc_scan;
 
-        int ref_cc = rows_v.front().cc;
-        int ref_rf = rows_v.front().rf;
-        int best = -1;
-        for (const auto &kv : cc_counts_for_rf_scan)
-            if (kv.second > best)
+            ref_cc = subset.front().cc;
+            ref_rf = subset.front().rf;
+
+            for (const auto &r : subset)
             {
-                best = kv.second;
-                ref_cc = kv.first;
+                cc_counts_for_rf_scan[r.cc]++;
+                rf_counts_for_cc_scan[r.rf]++;
             }
 
-        best = -1;
-        for (const auto &kv : rf_counts_for_cc_scan)
-            if (kv.second > best)
+            int best = -1;
+            for (const auto &kv : cc_counts_for_rf_scan)
             {
-                best = kv.second;
-                ref_rf = kv.first;
+                if (kv.second > best)
+                {
+                    best = kv.second;
+                    ref_cc = kv.first;
+                }
             }
 
-        std::string pdf = std::string(Form("%s/adc_calibration_rf_cc_summary_%.3fV.pdf", outdir, voltage_sel));
-        std::string root_out = std::string(Form("%s/adc_calibration_rf_cc_summary_%.3fV.root", outdir, voltage_sel));
+            best = -1;
+            for (const auto &kv : rf_counts_for_cc_scan)
+            {
+                if (kv.second > best)
+                {
+                    best = kv.second;
+                    ref_rf = kv.first;
+                }
+            }
+        };
 
-        TCanvas *c = new TCanvas(Form("c_adc_rf_cc_summary_%.3fV", voltage_sel), "", 1500, 900);
+        int ref_cc_adc = -1;
+        int ref_rf_adc = -1;
+        int ref_cc_tot = -1;
+        int ref_rf_tot = -1;
+
+        if (has_adc_for_voltage)
+            choose_refs(adc_rows_v, ref_cc_adc, ref_rf_adc);
+        if (has_tot_for_voltage)
+            choose_refs(tot_rows_v, ref_cc_tot, ref_rf_tot);
+
+        const char *summary_prefix = (!has_adc_for_voltage && has_tot_for_voltage)
+                                     ? "tot_calibration_rf_cc_summary"
+                                     : "adc_calibration_rf_cc_summary";
+
+        std::string pdf = std::string(Form("%s/%s_%.3fV.pdf", outdir, summary_prefix, voltage_sel));
+        std::string root_out = std::string(Form("%s/%s_%.3fV.root", outdir, summary_prefix, voltage_sel));
+
+        TCanvas *c = new TCanvas(Form("c_rf_cc_summary_%.3fV", voltage_sel), "", 1500, 900);
         c->SaveAs((pdf + "[").c_str());
 
-        // -------- Page 1: mean and sigma/RMS vs Rf and CC --------
-        c->Clear();
-        c->Divide(2, 2);
-
-        c->cd(1);
-        gPad->SetGrid();
+        if (has_adc_for_voltage)
         {
-            TGraphErrors *g = new TGraphErrors();
-            g->SetName("g_mean_vs_rf");
-            g->SetTitle(Form("Central mean vs Rf (V=%.3f, CC=%d);Rf setting;Mean (ADC)", voltage_sel, ref_cc));
-            fill_mean_graph_from_rows(g, rows_v, voltage_sel, true, ref_cc);
-            style_graph_basic(g, 20);
-            if (g->GetN() > 0)
-                g->Draw("AP");
-            TLatex t;
-            t.SetNDC();
-            t.SetTextFont(42);
-            t.SetTextSize(0.04);
-            // t.DrawLatex(0.16, 0.92, Form("Voltage = %.3f V", voltage_sel));
+            // -------- ADC Page 1: mean and sigma/RMS vs Rf and CC --------
+            c->Clear();
+            c->Divide(2, 2);
+
+            c->cd(1);
+            gPad->SetGrid();
+            {
+                TGraphErrors *g = new TGraphErrors();
+                g->SetName("g_mean_vs_rf");
+                g->SetTitle(Form("ADC central mean vs Rf (V=%.3f, CC=%d, V SiPM = %.3f);Rf setting;Mean (ADC)", voltage_sel, ref_cc_adc, voltage_sipm));
+                fill_mean_graph_from_rows(g, adc_rows_v, voltage_sel, true, ref_cc_adc);
+                style_graph_basic(g, 20);
+                if (g->GetN() > 0)
+                    g->Draw("AP");
+            }
+
+            c->cd(2);
+            gPad->SetGrid();
+            {
+                TGraphErrors *g = new TGraphErrors();
+                g->SetName("g_width_vs_rf");
+                g->SetTitle(Form("ADC %s vs Rf (V=%.3f, CC=%d, V SiPM = %.3f);Rf setting;%s (ADC)",
+                                 use_rms_for_summary ? "central RMS" : "central #sigma",
+                                 voltage_sel, ref_cc_adc, voltage_sipm,
+                                 use_rms_for_summary ? "RMS" : "#sigma"));
+                fill_graph_from_rows(g, adc_rows_v, voltage_sel, true, ref_cc_adc, use_rms_for_summary, false);
+                style_graph_basic(g, 20);
+                if (g->GetN() > 0)
+                    g->Draw("AP");
+            }
+
+            c->cd(3);
+            gPad->SetGrid();
+            {
+                TGraphErrors *g = new TGraphErrors();
+                g->SetName("g_mean_vs_cc");
+                g->SetTitle(Form("ADC central mean vs CC (V=%.3f, Rf=%d, V SiPM = %.3f);CC setting;Mean (ADC)", voltage_sel, ref_rf_adc, voltage_sipm));
+                fill_mean_graph_from_rows(g, adc_rows_v, voltage_sel, false, ref_rf_adc);
+                style_graph_basic(g, 20);
+                if (g->GetN() > 0)
+                    g->Draw("AP");
+            }
+
+            c->cd(4);
+            gPad->SetGrid();
+            {
+                TGraphErrors *g = new TGraphErrors();
+                g->SetName("g_width_vs_cc");
+                g->SetTitle(Form("ADC %s vs CC (V=%.3f, Rf=%d, V SiPM = %.3f);CC setting;%s (ADC)",
+                                 use_rms_for_summary ? "central RMS" : "central #sigma",
+                                 voltage_sel, ref_rf_adc, voltage_sipm,
+                                 use_rms_for_summary ? "RMS" : "#sigma"));
+                fill_graph_from_rows(g, adc_rows_v, voltage_sel, false, ref_rf_adc, use_rms_for_summary, false);
+                style_graph_basic(g, 20);
+                if (g->GetN() > 0)
+                    g->Draw("AP");
+            }
+
+            c->SaveAs(pdf.c_str());
+
+            // -------- ADC Page 2: resolution vs Rf and CC --------
+            c->Clear();
+            c->Divide(2, 2);
+
+            c->cd(1);
+            gPad->SetGrid();
+            {
+                TGraphErrors *g = new TGraphErrors();
+                g->SetName("g_res_vs_rf");
+                g->SetTitle(Form("ADC central resolution vs Rf (V=%.3f, CC=%d, V SiPM = %.3f);Rf setting;Resolution (%%)", voltage_sel, ref_cc_adc, voltage_sipm));
+                fill_graph_from_rows(g, adc_rows_v, voltage_sel, true, ref_cc_adc, use_rms_for_summary, true);
+                style_graph_basic(g, 20);
+                if (g->GetN() > 0)
+                    g->Draw("AP");
+            }
+
+            c->cd(2);
+            gPad->SetGrid();
+            {
+                TGraphErrors *g = new TGraphErrors();
+                g->SetName("g_res_vs_cc");
+                g->SetTitle(Form("ADC central resolution vs CC (V=%.3f, Rf=%d, V SiPM = %.3f);CC setting;Resolution (%%)", voltage_sel, ref_rf_adc, voltage_sipm));
+                fill_graph_from_rows(g, adc_rows_v, voltage_sel, false, ref_rf_adc, use_rms_for_summary, true);
+                style_graph_basic(g, 20);
+                if (g->GetN() > 0)
+                    g->Draw("AP");
+            }
+
+            c->cd(3);
+            {
+                TLatex t;
+                t.SetNDC();
+                t.SetTextFont(42);
+                t.SetTextSize(0.045);
+                t.DrawLatex(0.10, 0.86, "ADC summary configuration");
+                t.SetTextSize(0.038);
+                t.DrawLatex(0.10, 0.74, Form("Voltage: %.3f V", voltage_sel));
+                t.DrawLatex(0.10, 0.66, Form("Width used: %s", use_rms_for_summary ? "RMS" : "Gaussian fit #sigma"));
+                t.DrawLatex(0.10, 0.58, Form("Rf scan reference CC: %d", ref_cc_adc));
+                t.DrawLatex(0.10, 0.50, Form("CC scan reference Rf: %d", ref_rf_adc));
+                t.DrawLatex(0.10, 0.42, Form("Number of ADC runs: %d", (int)adc_rows_v.size()));
+            }
+
+            c->cd(4);
+            {
+                TLatex t;
+                t.SetNDC();
+                t.SetTextFont(42);
+                t.SetTextSize(0.040);
+                t.DrawLatex(0.10, 0.86, "Interpretation");
+                t.SetTextSize(0.035);
+                t.DrawLatex(0.10, 0.74, "Mean tracks the ADC signal scale.");
+                t.DrawLatex(0.10, 0.66, Form("%s tracks the ADC spread.", use_rms_for_summary ? "RMS" : "#sigma"));
+                t.DrawLatex(0.10, 0.58, "Resolution = width / mean.");
+                t.DrawLatex(0.10, 0.50, "This page uses only ADC-list runs.");
+            }
+
+            c->SaveAs(pdf.c_str());
         }
 
-        c->cd(2);
-        gPad->SetGrid();
+        if (has_tot_for_voltage)
         {
-            TGraphErrors *g = new TGraphErrors();
-            g->SetName("g_width_vs_rf");
-            g->SetTitle(Form("%s vs Rf (V=%.3f, CC=%d);Rf setting;%s (ADC)",
-                             use_rms_for_summary ? "Central RMS" : "Central #sigma",
-                             voltage_sel, ref_cc,
-                             use_rms_for_summary ? "RMS" : "#sigma"));
-            fill_graph_from_rows(g, rows_v, voltage_sel, true, ref_cc, use_rms_for_summary, false);
-            style_graph_basic(g, 20);
-            if (g->GetN() > 0)
-                g->Draw("AP");
-            TLatex t;
-            t.SetNDC();
-            t.SetTextFont(42);
-            t.SetTextSize(0.04);
-            // t.DrawLatex(0.16, 0.92, Form("Voltage = %.3f V", voltage_sel));
+            // -------- ToT Page 1: mean and sigma vs Rf and CC --------
+            c->Clear();
+            c->Divide(2, 2);
+
+            c->cd(1);
+            gPad->SetGrid();
+            {
+                TGraphErrors *g = new TGraphErrors();
+                g->SetName("g_tot_mean_vs_rf");
+                g->SetTitle(Form("ToT mean vs Rf (V=%.3f, CC=%d, V SiPM = %.3f);Rf setting;Mean ToT", voltage_sel, ref_cc_tot, voltage_sipm));
+                fill_tot_graph_from_rows(g, tot_rows_v, voltage_sel, true, ref_cc_tot, 0);
+                style_graph_basic(g, 20);
+                if (g->GetN() > 0)
+                    g->Draw("AP");
+            }
+
+            c->cd(2);
+            gPad->SetGrid();
+            {
+                TGraphErrors *g = new TGraphErrors();
+                g->SetName("g_tot_sigma_vs_rf");
+                g->SetTitle(Form("ToT #sigma vs Rf (V=%.3f, CC=%d, V SiPM = %.3f);Rf setting;#sigma ToT", voltage_sel, ref_cc_tot, voltage_sipm));
+                fill_tot_graph_from_rows(g, tot_rows_v, voltage_sel, true, ref_cc_tot, 1);
+                style_graph_basic(g, 20);
+                if (g->GetN() > 0)
+                    g->Draw("AP");
+            }
+
+            c->cd(3);
+            gPad->SetGrid();
+            {
+                TGraphErrors *g = new TGraphErrors();
+                g->SetName("g_tot_mean_vs_cc");
+                g->SetTitle(Form("ToT mean vs CC (V=%.3f, Rf=%d, V SiPM = %.3f);CC setting;Mean ToT", voltage_sel, ref_rf_tot, voltage_sipm));
+                fill_tot_graph_from_rows(g, tot_rows_v, voltage_sel, false, ref_rf_tot, 0);
+                style_graph_basic(g, 20);
+                if (g->GetN() > 0)
+                    g->Draw("AP");
+            }
+
+            c->cd(4);
+            gPad->SetGrid();
+            {
+                TGraphErrors *g = new TGraphErrors();
+                g->SetName("g_tot_sigma_vs_cc");
+                g->SetTitle(Form("ToT #sigma vs CC (V=%.3f, Rf=%d, V SiPM = %.3f);CC setting;#sigma ToT", voltage_sel, ref_rf_tot, voltage_sipm));
+                fill_tot_graph_from_rows(g, tot_rows_v, voltage_sel, false, ref_rf_tot, 1);
+                style_graph_basic(g, 20);
+                if (g->GetN() > 0)
+                    g->Draw("AP");
+            }
+
+            c->SaveAs(pdf.c_str());
+
+            // -------- ToT Page 2: resolution vs Rf and CC --------
+            c->Clear();
+            c->Divide(2, 2);
+
+            c->cd(1);
+            gPad->SetGrid();
+            {
+                TGraphErrors *g = new TGraphErrors();
+                g->SetName("g_tot_res_vs_rf");
+                g->SetTitle(Form("ToT resolution vs Rf (V=%.3f, CC=%d, V SiPM = %.3f);Rf setting;Resolution (%%)", voltage_sel, ref_cc_tot, voltage_sipm));
+                fill_tot_graph_from_rows(g, tot_rows_v, voltage_sel, true, ref_cc_tot, 2);
+                style_graph_basic(g, 20);
+                if (g->GetN() > 0)
+                    g->Draw("AP");
+            }
+
+            c->cd(2);
+            gPad->SetGrid();
+            {
+                TGraphErrors *g = new TGraphErrors();
+                g->SetName("g_tot_res_vs_cc");
+                g->SetTitle(Form("ToT resolution vs CC (V=%.3f, Rf=%d, V SiPM = %.3f);CC setting;Resolution (%%)", voltage_sel, ref_rf_tot, voltage_sipm));
+                fill_tot_graph_from_rows(g, tot_rows_v, voltage_sel, false, ref_rf_tot, 2);
+                style_graph_basic(g, 20);
+                if (g->GetN() > 0)
+                    g->Draw("AP");
+            }
+
+            c->cd(3);
+            {
+                TLatex t;
+                t.SetNDC();
+                t.SetTextFont(42);
+                t.SetTextSize(0.040);
+                t.DrawLatex(0.10, 0.84, "ToT summary configuration");
+                t.SetTextSize(0.034);
+                t.DrawLatex(0.10, 0.74, Form("Voltage: %.3f V", voltage_sel));
+                t.DrawLatex(0.10, 0.66, Form("Rf scan reference CC: %d", ref_cc_tot));
+                t.DrawLatex(0.10, 0.58, Form("CC scan reference Rf: %d", ref_rf_tot));
+                t.DrawLatex(0.10, 0.50, Form("Number of ToT runs: %d", (int)tot_rows_v.size()));
+            }
+
+            c->cd(4);
+            {
+                TLatex t;
+                t.SetNDC();
+                t.SetTextFont(42);
+                t.SetTextSize(0.040);
+                t.DrawLatex(0.10, 0.84, "ToT interpretation");
+                t.SetTextSize(0.034);
+                t.DrawLatex(0.10, 0.74, "Mean, #sigma, and resolution come from");
+                t.DrawLatex(0.10, 0.66, "a Gaussian fit to the raw central-crystal ToT histogram.");
+                t.DrawLatex(0.10, 0.58, "Resolution = #sigma / mean.");
+                t.DrawLatex(0.10, 0.50, "This page uses only ToT-list runs.");
+            }
+
+            c->SaveAs(pdf.c_str());
         }
 
-        c->cd(3);
-        gPad->SetGrid();
-        {
-            TGraphErrors *g = new TGraphErrors();
-            g->SetName("g_mean_vs_cc");
-            g->SetTitle(Form("Central mean vs CC (V=%.3f, Rf=%d);CC setting;Mean (ADC)", voltage_sel, ref_rf));
-            fill_mean_graph_from_rows(g, rows_v, voltage_sel, false, ref_rf);
-            style_graph_basic(g, 20);
-            if (g->GetN() > 0)
-                g->Draw("AP");
-            TLatex t;
-            t.SetNDC();
-            t.SetTextFont(42);
-            t.SetTextSize(0.04);
-            // t.DrawLatex(0.16, 0.92, Form("Voltage = %.3f V", voltage_sel));
-        }
-
-        c->cd(4);
-        gPad->SetGrid();
-        {
-            TGraphErrors *g = new TGraphErrors();
-            g->SetName("g_width_vs_cc");
-            g->SetTitle(Form("%s vs CC (V=%.3f, Rf=%d);CC setting;%s (ADC)",
-                             use_rms_for_summary ? "Central RMS" : "Central #sigma",
-                             voltage_sel, ref_rf,
-                             use_rms_for_summary ? "RMS" : "#sigma"));
-            fill_graph_from_rows(g, rows_v, voltage_sel, false, ref_rf, use_rms_for_summary, false);
-            style_graph_basic(g, 20);
-            if (g->GetN() > 0)
-                g->Draw("AP");
-            TLatex t;
-            t.SetNDC();
-            t.SetTextFont(42);
-            t.SetTextSize(0.04);
-            // t.DrawLatex(0.16, 0.92, Form("Voltage = %.3f V", voltage_sel));
-        }
-
-        c->SaveAs(pdf.c_str());
-
-        // -------- Page 2: resolution vs Rf and CC --------
-        c->Clear();
-        c->Divide(2, 2);
-
-        c->cd(1);
-        gPad->SetGrid();
-        {
-            TGraphErrors *g = new TGraphErrors();
-            g->SetName("g_res_vs_rf");
-            g->SetTitle(Form("Central resolution vs Rf (V=%.3f, CC=%d);Rf setting;Resolution (%%)", voltage_sel, ref_cc));
-            fill_graph_from_rows(g, rows_v, voltage_sel, true, ref_cc, use_rms_for_summary, true);
-            style_graph_basic(g, 20);
-            if (g->GetN() > 0)
-                g->Draw("AP");
-        }
-
-        c->cd(2);
-        gPad->SetGrid();
-        {
-            TGraphErrors *g = new TGraphErrors();
-            g->SetName("g_res_vs_cc");
-            g->SetTitle(Form("Central resolution vs CC (V=%.3f, Rf=%d);CC setting;Resolution (%%)", voltage_sel, ref_rf));
-            fill_graph_from_rows(g, rows_v, voltage_sel, false, ref_rf, use_rms_for_summary, true);
-            style_graph_basic(g, 20);
-            if (g->GetN() > 0)
-                g->Draw("AP");
-        }
-
-        c->cd(3);
-        {
-            TLatex t;
-            t.SetNDC();
-            t.SetTextFont(42);
-            t.SetTextSize(0.045);
-            t.DrawLatex(0.10, 0.86, "Summary configuration");
-            t.SetTextSize(0.038);
-            t.DrawLatex(0.10, 0.74, Form("Voltage: %.3f V", voltage_sel));
-            t.DrawLatex(0.10, 0.66, Form("Width used: %s", use_rms_for_summary ? "RMS" : "Gaussian fit #sigma"));
-            t.DrawLatex(0.10, 0.58, Form("Rf scan reference CC: %d", ref_cc));
-            t.DrawLatex(0.10, 0.50, Form("CC scan reference Rf: %d", ref_rf));
-            t.DrawLatex(0.10, 0.42, Form("Number of processed runs: %d", (int)rows_v.size()));
-        }
-
-        c->cd(4);
-        {
-            TLatex t;
-            t.SetNDC();
-            t.SetTextFont(42);
-            t.SetTextSize(0.040);
-            t.DrawLatex(0.10, 0.86, "Interpretation");
-            t.SetTextSize(0.035);
-            t.DrawLatex(0.10, 0.74, "Mean tracks the signal scale.");
-            t.DrawLatex(0.10, 0.66, Form("%s tracks the spread.", use_rms_for_summary ? "RMS" : "#sigma"));
-            t.DrawLatex(0.10, 0.58, "Resolution = width / mean.");
-            t.DrawLatex(0.10, 0.50, "This PDF contains only one voltage.");
-        }
-
-        c->SaveAs(pdf.c_str());
         c->SaveAs((pdf + "]").c_str());
         std::cout << "Saved RF/CC summary PDF: " << pdf << "\n";
 
-        TFile *fout = TFile::Open(root_out.c_str(), "RECREATE");
-        if (fout && !fout->IsZombie())
+        // Save summary table as ROOT tree
         {
-            TTree *t = new TTree("rf_cc_summary", "rf_cc_summary");
-            int run = 0, cc = 0, rf = 0;
+            TFile *fout = TFile::Open(root_out.c_str(), "RECREATE");
+            TTree *t = new TTree("rf_cc_summary", "RF/CC summary");
+
+            int run = 0;
             float voltage = 0.0f;
+            int cc = 0;
+            int rf = 0;
+            float voltage_sipm = 0.0f;
+            int is_tot_summary = 0;
             float mean = 0.0f, emean = 0.0f, sigma = 0.0f, esigma = 0.0f, rms = 0.0f, erms = 0.0f;
             float res_fit = 0.0f, res_fit_err = 0.0f, res_rms = 0.0f;
+            float tot_mean = 0.0f, tot_emean = 0.0f, tot_sigma = 0.0f, tot_esigma = 0.0f, tot_res = 0.0f, tot_res_err = 0.0f;
 
             t->Branch("run", &run, "run/I");
             t->Branch("voltage", &voltage, "voltage/F");
             t->Branch("cc", &cc, "cc/I");
             t->Branch("rf", &rf, "rf/I");
+            t->Branch("voltage_sipm", &voltage_sipm, "voltage_sipm/F");
+            t->Branch("is_tot_summary", &is_tot_summary, "is_tot_summary/I");
             t->Branch("mean", &mean, "mean/F");
             t->Branch("emean", &emean, "emean/F");
             t->Branch("sigma", &sigma, "sigma/F");
@@ -1975,6 +2362,12 @@ static void make_adc_rf_cc_summary(const std::vector<LedRunSummaryRFCC> &rows,
             t->Branch("res_fit_pct", &res_fit, "res_fit_pct/F");
             t->Branch("res_fit_pct_err", &res_fit_err, "res_fit_pct_err/F");
             t->Branch("res_rms_pct", &res_rms, "res_rms_pct/F");
+            t->Branch("tot_mean", &tot_mean, "tot_mean/F");
+            t->Branch("tot_emean", &tot_emean, "tot_emean/F");
+            t->Branch("tot_sigma", &tot_sigma, "tot_sigma/F");
+            t->Branch("tot_esigma", &tot_esigma, "tot_esigma/F");
+            t->Branch("tot_res_pct", &tot_res, "tot_res_pct/F");
+            t->Branch("tot_res_pct_err", &tot_res_err, "tot_res_pct_err/F");
 
             for (const auto &r : rows_v)
             {
@@ -1991,6 +2384,14 @@ static void make_adc_rf_cc_summary(const std::vector<LedRunSummaryRFCC> &rows,
                 res_fit = (float)r.res_fit_pct;
                 res_fit_err = (float)r.res_fit_pct_err;
                 res_rms = (float)r.res_rms_pct;
+                voltage_sipm = r.voltage_sipm;
+                is_tot_summary = r.is_tot_summary ? 1 : 0;
+                tot_mean = (float)r.tot_mean;
+                tot_emean = (float)r.tot_emean;
+                tot_sigma = (float)r.tot_sigma;
+                tot_esigma = (float)r.tot_esigma;
+                tot_res = (float)r.tot_res_pct;
+                tot_res_err = (float)r.tot_res_pct_err;
                 t->Fill();
             }
 
@@ -2018,11 +2419,14 @@ void adc_calib_rf_cc_scan(const char *data_dir = "data",
     gErrorIgnoreLevel = kWarning;
     mkdir_p(outdir);
 
+    // Voltage_SiPM 
+    float Voltage_SiPM = 40.5f;
+
     // IMPORTANT:
     // Use a struct/tuple, not std::vector<std::vector<int,float,...>>.
-    std::vector<LedRunCalibRFCC> runs = {
-        // {381, 1.26f, 12, 3},
-        {382, 1.26f, 12, 1},
+    std::vector<LedRunCalibRFCC> runs_adc= {
+        // {run, voltage, cc, rf},
+        /*{382, 1.26f, 12, 1},
         {383, 1.26f, 12, 2},
         {385, 1.26f, 12, 4},
         {386, 1.26f, 12, 5},
@@ -2080,12 +2484,66 @@ void adc_calib_rf_cc_scan(const char *data_dir = "data",
         {444, 1.26f, 14, 3},
         {445, 0.0f, 14, 3},
         {446, 1.26f, 15, 3},
-        {447, 0.0f, 15, 3}};
+        {447, 0.0f, 15, 3}*/
+        {592, 2.3f, 12, 3},
+        {593, 2.3f, 12, 4},
+        {594, 2.3f, 12, 5},
+        {595, 2.3f, 12, 6},
+        {596, 2.3f, 12, 7},
+        {597, 2.3f, 12, 8},
+        {598, 2.3f, 12, 9},
+        {599, 2.3f, 12, 10},
+        {600, 2.3f, 12, 11},
+        {601, 2.3f, 12, 12},
+        {602, 2.3f, 12, 13},
+        {603, 2.3f, 12, 14},
+        {604, 2.3f, 12, 15},
+        {618, 2.0f, 1, 3},
+        {619, 2.0f, 2, 3},
+        {620, 2.0f, 3, 3},
+        {621, 2.0f, 4, 3},
+        {622, 2.0f, 5, 3},
+        {623, 2.0f, 6, 3},
+        {624, 2.0f, 7, 3},
+        {625, 2.0f, 8, 3},
+        {626, 2.0f, 9, 3},
+        {627, 2.0f, 10, 3},
+        {628, 2.0f, 11, 3},
+        {629, 2.0f, 12, 3},
+        {630, 2.0f, 13, 3},
+        {631, 2.0f, 14, 3},
+        {632, 2.0f, 15, 3}
+        };
+    
+    std::vector<LedRunCalibRFCC> runs_tot= {
+        // {run, voltage, cc, rf},
+        {605, 3.0f, 12, 3},
+        {606, 3.0f, 12, 4},
+        {607, 3.0f, 12, 5},
+        {608, 3.0f, 12, 6},
+        {609, 3.0f, 12, 7},
+        {610, 3.0f, 12, 8},
+        {611, 3.0f, 12, 9},
+        {612, 3.0f, 12, 10},
+        {613, 3.0f, 12, 11},
+        {614, 3.0f, 12, 12},
+        {615, 3.0f, 12, 13},
+        {616, 3.0f, 12, 14},
+        {617, 3.0f, 12, 15},
+        {633, 2.8f, 8, 3},
+        {634, 2.8f, 9, 3},
+        {635, 2.8f, 10, 3},
+        {636, 2.8f, 11, 3},
+        {637, 2.8f, 12, 3},
+        {638, 2.8f, 13, 3},
+        {639, 2.8f, 14, 3},
+        {640, 2.8f, 15, 3}
+        };
 
     std::vector<LedRunSummaryRFCC> rows;
-    rows.reserve(runs.size());
+    rows.reserve(runs_adc.size() + runs_tot.size());
 
-    for (const auto &rv : runs)
+    for (const auto &rv : runs_adc)
     {
         const std::string infile = std::string(Form("%s/Run%03d.root", data_dir, rv.run));
         const std::string gain_file = find_gain_file_for_run(gain_dir, rv.run, rv.voltage);
@@ -2108,7 +2566,9 @@ void adc_calib_rf_cc_scan(const char *data_dir = "data",
                                   use_common_mode,
                                   470.0f,
                                   rv.cc,
-                                  rv.rf);
+                                  rv.rf,
+                                  Voltage_SiPM,
+                                  false);
 
         LedRunSummaryRFCC row;
         const std::string root_path = std::string(Form("%s/adc_to_ref_calibration_%s.root",
@@ -2122,6 +2582,48 @@ void adc_calib_rf_cc_scan(const char *data_dir = "data",
         else
         {
             std::cerr << "Warning: could not read summary back from " << root_path << "\n";
+        }
+    }
+
+    for (const auto &rv : runs_tot)
+    {
+        const std::string infile = std::string(Form("%s/Run%03d.root", data_dir, rv.run));
+        const std::string gain_file = find_gain_file_for_run(gain_dir, rv.run, rv.voltage);
+
+        std::cout << "\n--- ToT RF/CC scan: " << infile
+                  << " @ V=" << rv.voltage
+                  << "  CC=" << rv.cc
+                  << "  Rf=" << rv.rf
+                  << "  gain=" << gain_file
+                  << " ---\n";
+
+        adc_calibration_rf_cc_one(infile.c_str(),
+                                  rv.voltage,
+                                  mapping_csv,
+                                  gain_file.c_str(),
+                                  outdir,
+                                  1000000,
+                                  0.0f,
+                                  false,          // do not use hybrid here; this is a dedicated ToT histogram
+                                  use_common_mode,
+                                  470.0f,
+                                  rv.cc,
+                                  rv.rf,
+                                  Voltage_SiPM,
+                                  true);          // make ToT histogram, fit, and summary parameters
+
+        LedRunSummaryRFCC row;
+        const std::string root_path = std::string(Form("%s/tot_calibration_%s.root",
+                                                       outdir,
+                                                       make_rf_cc_tag(rv.run, rv.voltage, rv.cc, rv.rf).c_str()));
+
+        if (read_run_summary_from_root(root_path, row))
+        {
+            rows.push_back(row);
+        }
+        else
+        {
+            std::cerr << "Warning: could not read ToT summary back from " << root_path << "\n";
         }
     }
 
