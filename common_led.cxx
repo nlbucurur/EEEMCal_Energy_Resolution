@@ -55,8 +55,8 @@ float g_cog_sy = 0.80f;
 //========================================================//
 //==============       Change this        ================//
 //========================================================//
-std::set<int> g_selected_central_sipms = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};   // choose 0..15
-// std::set<int> g_selected_central_sipms = {15};   // choose 0..15
+// std::set<int> g_selected_central_sipms = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};   // choose 0..15
+std::set<int> g_selected_central_sipms = {15};   // choose 0..15
 
 
 // crystals to ignore (e.g., Tristan ignored crystal 9)
@@ -580,7 +580,8 @@ bool calculate_signal_hybrid(uint32_t *adc_values,
 {
     if (has_tot(tot_values))
     {
-        signal_out = get_tot_first(tot_values) * gain_adc; // Assuming same gain for ToT, adjust if different
+        // signal_out = get_tot_first(tot_values) * gain_adc; // Assuming same gain for ToT, adjust if different
+        signal_out = get_tot_max(tot_values) * gain_adc; // Assuming same gain for ToT, adjust if different
         used_tot = true;
         return true;
     }
